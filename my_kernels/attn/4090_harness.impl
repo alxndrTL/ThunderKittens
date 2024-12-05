@@ -2,7 +2,7 @@
 #include <string>
 #include <fstream>
 
-constexpr int ATTN_B = 8;
+constexpr int ATTN_B = 8; // input file is supposed to have B=1 only (the batch gets replicated)
 constexpr int ATTN_H = 8;
 constexpr int ATTN_N = 1024;
 constexpr int ATTN_D = 64; // hardcoded into this kernel

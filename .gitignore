@@ -6,3 +6,6 @@
 *.fatbin
 __pycache__/
 */printouts/*
+*.txt
+*.d
+*_fwd

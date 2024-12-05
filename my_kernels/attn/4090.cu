@@ -53,10 +53,10 @@ __global__ void attend_ker(const __grid_constant__ globals<D> g) {
     load_group::load_async<1, false>(k_smem[loadid][0], g.Kg, {batch, loadid, head, 0});
     load_group::load_async<1, false>(v_smem[loadid][0], g.Vg, {batch, loadid, head, 0});
     // iterate over k, v for these q's that have been loaded
-    for(auto kv_idx = 0; kv_idx < kv_blocks; kv_idx++, tic=(tic+1)%3) {
+    for(auto kv_idx = 0; kv_idx < kv_blocks; kv_idx++, tic=(tic+1)%PIPE_STAGES) {
         int next_load_idx = (kv_idx+1)*LOAD_BLOCKS + loadid;
         if(next_load_idx*ROWS<D> < g.Kg.depth) {
-            int next_tic = (tic+1)%3;
+            int next_tic = (tic+1)%PIPE_STAGES;
             load_group::load_async<1, false>(k_smem[loadid][next_tic], g.Kg, {batch, next_load_idx, head, 0});
             load_group::load_async<1, false>(v_smem[loadid][next_tic], g.Vg, {batch, next_load_idx, head, 0});
             load_async_wait<1>(); // next k, v can stay in flight.

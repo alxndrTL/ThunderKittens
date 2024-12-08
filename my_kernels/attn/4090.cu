@@ -34,7 +34,7 @@ __global__ void attend_ker(const __grid_constant__ globals<D> g) {
     attn_tile<D, float> att_block; // attention tile, in float. (We want to use float wherever possible.)
     attn_tile<D, bf16> att_block_mma; // bf16 attention tile for the second mma_AB. We cast right before that op.
     typename attn_tile<D, float>::col_vec max_vec_last, max_vec, norm_vec; // these are column vectors for the in-place softmax.
-    // each warp loads its own Q tile of 16x64
+    // each warp loads its own Q tile of 16x128 or 32x64
     if (q_seq*ROWS<D> < g.Qg.depth) {
         load<1, false>(qo_smem[workerid], g.Qg, {batch, q_seq, head, 0});  // going through shared memory improves coalescing of dram reads.
         __syncwarp();

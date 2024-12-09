@@ -5,7 +5,7 @@
 constexpr int ATTN_B = 1; // input file is supposed to have B=1 only (the batch gets replicated)
 constexpr int ATTN_H = 1;
 constexpr int ATTN_N = 1024;
-constexpr int ATTN_D = 64; // hardcoded into this kernel
+constexpr int ATTN_D = 16; // hardcoded into this kernel
 constexpr int ITER   = 10;
 
 #define BLOCK_SIZE (32*NUM_WORKERS)
@@ -106,7 +106,7 @@ int main(int argc, char **argv) {
 
     cudaDeviceSynchronize();
     std::cout << "Starting kernel\n";
-    dim3 grid((ATTN_N + qkvo_tile<ATTN_D>::rows*NUM_WORKERS - 1) / (qkvo_tile<ATTN_D>::rows*NUM_WORKERS), ATTN_H, ATTN_B);
+    dim3 grid(ATTN_H, ATTN_B, 1); // todo: that's weird? // todo : better coalescing possible?
     const auto start = std::chrono::high_resolution_clock::now();
     for(int i = 0; i < ITER; i++) {
         attend_ker<ATTN_D><<<grid, BLOCK_SIZE, mem_size>>>(g);

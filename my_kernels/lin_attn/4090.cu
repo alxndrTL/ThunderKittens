@@ -81,7 +81,7 @@ __global__ void attend_ker(const __grid_constant__ globals<D> g) {
             mma_AB(o_reg, att_block_mma, v_reg, o_reg); // (ROWS, D)
             mma_AB(o_reg, q_reg, h_reg, o_reg); // (ROWS, D)
             
-            swap_layout_inplace(h_reg);
+            swap_layout_inplace<bf16, D, D, col_l>(h_reg);
             
             mma_AtB(h_reg, k_reg, v_reg, h_reg); // (D, D)
         }

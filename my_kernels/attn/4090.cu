@@ -50,6 +50,8 @@ __global__ void attend_ker(const __grid_constant__ globals<D> g) {
     zero(o_reg);
     // launch the load of the first k, v tiles
     int kv_blocks = (g.Kg.depth + LOAD_BLOCKS*ROWS<D>-1) / (LOAD_BLOCKS*ROWS<D>), tic = 0;
+    //printf("LOAD_BLOCKS %d\n",LOAD_BLOCKS);
+    //printf("kv_blocks %d\n",kv_blocks);
     load_group::load_async<1, false>(k_smem[loadid][0], g.Kg, {batch, loadid, head, 0});
     load_group::load_async<1, false>(v_smem[loadid][0], g.Vg, {batch, loadid, head, 0});
     // iterate over k, v for these q's that have been loaded
@@ -67,12 +69,12 @@ __global__ void attend_ker(const __grid_constant__ globals<D> g) {
         #pragma unroll LOAD_BLOCKS
         for(int subtile = 0; subtile < LOAD_BLOCKS && (kv_idx*LOAD_BLOCKS + subtile)*ROWS<D> < g.Kg.depth; subtile++) {
             load(k_reg, k_smem[subtile][tic]); // load k from shared into registers
-            zero(att_block); // zero 16x16 attention tile
+            zero(att_block); // zero ROWSxROWS attention tile
             mma_ABt(att_block, q_reg, k_reg, att_block); // Q@K.T
             int first_index = (kv_idx*LOAD_BLOCKS + subtile)*ROWS<D>; // one past the last KV index of this tile
             int start_fill = g.Kg.depth-first_index < ROWS<D> ? g.Kg.depth-first_index : ROWS<D>;
             right_fill(att_block, att_block, start_fill, base_types::constants<float>::neg_infty());
-            copy(max_vec_last,  max_vec);
+            copy(max_vec_last, max_vec);
             row_max(max_vec, att_block, max_vec); 
             sub_row(att_block, att_block, max_vec); 
             exp2(att_block, att_block); 

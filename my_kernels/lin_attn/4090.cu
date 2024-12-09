@@ -74,16 +74,19 @@ __global__ void attend_ker(const __grid_constant__ globals<D> g) {
             load(k_reg, k_smem[subtile][tic]);
             zero(att_block); // zero ROWSxROWS attention tile
             mma_ABt(att_block, q_reg, k_reg, att_block); // Q@K.T, (ROWS*ROWS)
-            //todo : causal masking on att_block
+            //todo : causal masking on att_block (cf make_causal)
             copy(att_block_mma, att_block); // todo: necessary?
 
             load(v_reg, v_smem[subtile][tic]);
             mma_AB(o_reg, att_block_mma, v_reg, o_reg); // (ROWS, D)
             mma_AB(o_reg, q_reg, h_reg, o_reg); // (ROWS, D)
-            
-            swap_layout_inplace<bf16, D, D, col_l>(h_reg);
-            
-            mma_AtB(h_reg, k_reg, v_reg, h_reg); // (D, D)
+
+            auto &h_reg_row = swap_layout_inplace(h_reg); // attention, cela occupe des registres!!
+            auto &k_reg_col = swap_layout_inplace(k_reg);
+
+            //swap_layout(v_reg, k_reg); //on pourrait utiliser un reg annexe
+
+            mma_AtB(h_reg_row, k_reg_col, v_reg, h_reg_row); // (D, D)
         }
     }
 }

@@ -16,7 +16,7 @@
 using namespace kittens;
 
 struct based_globals { 
-    // shapes    
+    // shapes
     static constexpr int dv = 64;
     static constexpr int fd = 16;
 
@@ -212,6 +212,7 @@ void based_linear_attention(const __grid_constant__ based_globals g) {
             store(o_s[warpid], o);
         }
         total_block_idx = (total_block_idx+ACTIVE_TILES)%(ACTIVE_TILES+1); // count backwards on the ring
+        printf("%d\n", total_block_idx);
         __syncthreads();
 
         for(int t = 0; t < ACTIVE_TILES; t++) {

@@ -110,7 +110,7 @@ __device__ static void mul_slice(rt_bf<16, 16> &reg) {
         bf16_2 src_val = reg.tiles[0][0].data[2*col_offset + row_offset];
         bf16 val = __shfl_sync(kittens::MASK_ALL, (target_col%2 == 0) ? src_val.x : src_val.y, src_thread);
 
-        val *= __float2bfloat16(0.70710678118);
+        val *= __float2bfloat16(0.70710678118); // sqrt(2)/2
 
         reg.tiles[0][0].data[row_offset] *= bf16_2{val, val};
         reg.tiles[0][0].data[row_offset+2] *= bf16_2{val, val};
@@ -226,7 +226,7 @@ void based_linear_attention(const __grid_constant__ based_globals g) {
 
             load(k, k_s[t]);
             mul_slice(k);
-            auto &kt = transpose_inplace(k); 
+            auto &kt = transpose_inplace(k);
 
             load(v, v_s[t]);
             auto &v_col = swap_layout_inplace(v);

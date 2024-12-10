@@ -35,22 +35,17 @@ __global__ void attend_ker(const __grid_constant__ globals<D> g) {
     attn_tile<D, float> att_block; // attention tile, in float. (We want to use float wherever possible.)
     attn_tile<D, bf16> att_block_mma; // bf16 attention tile for the second mma_AB. We cast right before that op.
     h_tile<D, bf16, col_l> h_reg; // mma_AB so colum layout!
+    h_tile<D, float> h_reg_row_float;
 
     if constexpr(D == 16) mul(q_reg, q_reg, __float2bfloat16(0.25f));
     else if constexpr(D == 32) mul(q_reg, q_reg, __float2bfloat16(0.1767766953f));
 
-    zero(o_reg);
     zero(h_reg);
     // launch the load of the first q, k, v tiles (cdiv(L, (number of groups) * ROWS) because each groups treats ROWS)
     int qkv_blocks = (g.Qg.depth + LOAD_BLOCKS*ROWS<D>-1) / (LOAD_BLOCKS*ROWS<D>);
     int tic = 0;
     //printf("%d\n", loadid);
-    load_group::load_async<1, false>(q_smem[loadid][0], g.Qg, {batch, loadid, head, 0});
-    load_group::load_async<1, false>(k_smem[loadid][0], g.Kg, {0, 0, 0, 0});
-    load_group::load_async<1, false>(v_smem[loadid][0], g.Vg, {0, 0, 0, 0});
-
-    //todo : other possible design choice
-    //double for loop like in FA...
+    //todo : other possible design choices??
     
     load_group::load_async<1, false>(q_smem[loadid][0], g.Qg, {batch, loadid, head, 0});
     load_group::load_async<1, false>(k_smem[loadid][0], g.Kg, {batch, loadid, head, 0});
@@ -78,16 +73,48 @@ __global__ void attend_ker(const __grid_constant__ globals<D> g) {
             copy(att_block_mma, att_block); // todo: necessary?
 
             load(v_reg, v_smem[subtile][tic]);
+            zero(o_reg);
             mma_AB(o_reg, att_block_mma, v_reg, o_reg); // (ROWS, D)
+
+            
+
+            /*
             mma_AB(o_reg, q_reg, h_reg, o_reg); // (ROWS, D)
 
-            auto &h_reg_row = swap_layout_inplace(h_reg); // attention, cela occupe des registres!!
+            // todo : virer les auto et utiliser un type prédef.
+            auto &h_reg_col = swap_layout_inplace(h_reg); // attention, cela occupe des registres!!
+            copy(h_reg_row_float, h_reg_col);
             auto &k_reg_col = swap_layout_inplace(k_reg);
 
-            //swap_layout(v_reg, k_reg); //on pourrait utiliser un reg annexe
+            //swap_layout(v_reg, k_reg); //on pourrait utiliser un reg annexe qu'on n'utilise plus ?? pour save des registers
 
-            mma_AtB(h_reg_row, k_reg_col, v_reg, h_reg_row); // (D, D)
+            mma_AtB(h_reg_row_float, k_reg_col, v_reg, h_reg_row_float); // (D, D)
+
+            //prepare h for next step
+            copy(h_reg_col, h_reg_row_float);
+            swap_layout(h_reg, h_reg_col);
+            */
+
+            store(o_smem[subtile], o_reg);
         }
+
+        __syncthreads();
+        if (qkv_idx*ROWS<D> < g.Og.depth) { // write out o.
+            store(o_smem[workerid], o_reg); // going through shared memory improves coalescing of dram writes.
+            __syncwarp();
+            store<1, false>(g.Og, o_smem[workerid], {batch, qkv_idx, head, 0});
+        }
+
+        //todo : output pipelining?
+
+        /*
+        __syncthreads();
+        if (qkv_idx*ROWS<D> < g.Og.depth) { // write out o.
+            store(o_smem[workerid], o_reg); // going through shared memory improves coalescing of dram writes.
+            __syncwarp();
+            store<1, false>(g.Og, o_smem[workerid], {batch, qkv_idx, head, 0});
+        }
+        */
     }
 }
 

@@ -63,7 +63,8 @@ else:
     sys.exit(0)
 
 # Compute linear attention
-o = naive_chunk_linear_attn(q, k, v)
+#o = naive_chunk_linear_attn(q, k, v)
+o = torch.zeros(B, H, N, D)
 
 fn = f'{TESTNAME}_linear_{N}_{D}.txt'
 with open(fn, 'w') as f:

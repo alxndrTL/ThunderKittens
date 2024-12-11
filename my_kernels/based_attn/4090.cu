@@ -16,20 +16,16 @@
 using namespace kittens;
 
 struct based_globals { 
-    // shapes
-    static constexpr int dv = 64;
-    static constexpr int fd = 16;
-
-    using q_tile = st_bf<16, fd>;
-    using k_tile = st_bf<16, fd>;
-    using v_tile = st_bf<16, dv>;
-    using o_tile = st_bf<16, dv>;
+    using q_tile = st_bf<16, D_QK>;
+    using k_tile = st_bf<16, D_QK>;
+    using v_tile = st_bf<16, D_VO>;
+    using o_tile = st_bf<16, D_VO>;
 
     // global layouts
-    using q_gl     = gl<bf16,  -1, -1, -1, fd, q_tile>;
-    using k_gl     = gl<bf16,  -1, -1, -1, fd, k_tile>;
-    using v_gl     = gl<bf16,  -1, -1, -1, dv, v_tile>;
-    using o_gl     = gl<bf16,  -1, -1, -1, dv, o_tile>;
+    using q_gl     = gl<bf16,  -1, -1, -1, D_QK, q_tile>;
+    using k_gl     = gl<bf16,  -1, -1, -1, D_QK, k_tile>;
+    using v_gl     = gl<bf16,  -1, -1, -1, D_VO, v_tile>;
+    using o_gl     = gl<bf16,  -1, -1, -1, D_VO, o_tile>;
 
     // pointers
     q_gl q;
@@ -58,7 +54,6 @@ void based_linear_attention(const __grid_constant__ based_globals g) {
     const int batch = blockIdx.y;
     const int head  = blockIdx.x;
 
-    int laneid = kittens::laneid(); 
     int warpid = kittens::warpid(); 
 
     extern __shared__ alignment_dummy __shm[]; 
@@ -68,7 +63,6 @@ void based_linear_attention(const __grid_constant__ based_globals g) {
     st_bf<16,16> (&k_s)[ACTIVE_TILES]   = al.allocate<st_bf<16,16>, ACTIVE_TILES>();
     st_bf<16,64> (&v_s)[ACTIVE_TILES]   = al.allocate<st_bf<16,64>, ACTIVE_TILES>();
     st_bf<16,64> (&o_s)[ACTIVE_TILES]   = al.allocate<st_bf<16,64>, ACTIVE_TILES>();
-
     st_bf<16, 64> (&s_s)[ACTIVE_TILES + 1]  = al.allocate<st_bf<16, 64>, ACTIVE_TILES + 1>();
 
     int total_block_idx = 0; 
@@ -108,7 +102,7 @@ void based_linear_attention(const __grid_constant__ based_globals g) {
             make_causal(local_attn_bf, local_attn_bf, kittens::base_types::constants<bf16>::zero());
 
             load(v, v_s[warpid]);
-            auto &v_col = swap_layout_inplace(v);
+            auto &v_col = swap_layout_inplace(v); // could define v with col_l directly?
 
             zero(o);
             mma_AB(o, local_attn_bf, v_col, o);
@@ -126,7 +120,7 @@ void based_linear_attention(const __grid_constant__ based_globals g) {
         if(warpid < ACTIVE_TILES) {
             rt_bf<16, 64> s;
             load(q, q_s[warpid]); 
-            load(s, s_s[(total_block_idx+warpid)%(ACTIVE_TILES+1)]);
+            load(s, s_s[(total_block_idx+warpid)%(ACTIVE_TILES+1)]); // could define s with col_l directly?
             auto &s_col = swap_layout_inplace(s);
             mma_AB(o, q, s_col, o); 
             store(o_s[warpid], o);

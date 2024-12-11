@@ -16,7 +16,7 @@
 using namespace kittens;
 
 struct based_globals { 
-    // shapes
+    // shapes    
     static constexpr int dv = 64;
     static constexpr int fd = 16;
 
@@ -37,7 +37,7 @@ struct based_globals {
     v_gl v;
     o_gl o;
 
-    long unsigned int n;
+    int n;
 };
 
 template<kittens::ducks::st::all ST, int N_TILES>
@@ -104,12 +104,13 @@ __device__ static void mul_slice(rt_bf<16, 16> &reg) {
     
     #pragma unroll
     for(int row_offset = 0; row_offset < 2; row_offset++) {
+        const int dst_row = row_offset*8 + lane / 4;
         const int src_thread = (lane / 4)*4 + (target_col%8)/2;
         const int col_offset = target_col >= 8;
         bf16_2 src_val = reg.tiles[0][0].data[2*col_offset + row_offset];
         bf16 val = __shfl_sync(kittens::MASK_ALL, (target_col%2 == 0) ? src_val.x : src_val.y, src_thread);
 
-        val *= __float2bfloat16(0.70710678118); // sqrt(2)/2
+        val *= __float2bfloat16(0.70710678118);
 
         reg.tiles[0][0].data[row_offset] *= bf16_2{val, val};
         reg.tiles[0][0].data[row_offset+2] *= bf16_2{val, val};
@@ -225,7 +226,7 @@ void based_linear_attention(const __grid_constant__ based_globals g) {
 
             load(k, k_s[t]);
             mul_slice(k);
-            auto &kt = transpose_inplace(k);
+            auto &kt = transpose_inplace(k); 
 
             load(v, v_s[t]);
             auto &v_col = swap_layout_inplace(v);
@@ -251,9 +252,11 @@ void based_linear_attention(const __grid_constant__ based_globals g) {
 
 based_globals based_init(
     bf16 *d_q, bf16 *d_k, bf16 *d_v, bf16 *d_o,
-    long unsigned int ATTN_B, long unsigned int ATTN_H, long unsigned int ATTN_N
+    int ATTN_B, int ATTN_H, int ATTN_N
 ) {
     // global pointers
+    int ATTN_D = 64; 
+    int ATTN_D_SMALL = 16;
 
     using globals = based_globals;
 

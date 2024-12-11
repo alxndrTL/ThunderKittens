@@ -2,11 +2,11 @@
 #include <string>
 #include <fstream>
 
-constexpr int ATTN_B = 1;
-constexpr int ATTN_H = 1;
-constexpr int ATTN_N = 1024;
-constexpr int ATTN_D = 64; // hardcoded into this kernel
-constexpr int ATTN_D_SMALL = 16; // hardcoded into this kernel
+#define ATTN_B 16
+#define ATTN_H 16
+#define ATTN_N 1024
+#define ATTN_D 64 // hardcoded into this kernel
+#define ATTN_D_SMALL 16 // hardcoded into this kernel
 
 // Function to calculate the number of floating-point operations
 long long flops(int batch, int seqlen, int headdim, int nheads, int featuredim) {
@@ -85,19 +85,18 @@ int main(int argc, char **argv) {
 
         std::cout << "Starting to enter!" << std::endl;
 
-        for(int i = 0; i < TOTAL_ELEMENTS_QK; i++) infile >> q[i];
+        for(int i = 0; i < TOTAL_ELEMENTS_QK/(ATTN_B*ATTN_H); i++) infile >> q[i];
         std::cout << "Finished loading Q" << std::endl;
-        for(int i = 0; i < TOTAL_ELEMENTS_QK; i++) infile >> k[i];
+        for(int i = 0; i < TOTAL_ELEMENTS_QK/(ATTN_B*ATTN_H); i++) infile >> k[i];
         std::cout << "Finished loading K" << std::endl;
-        for(int i = 0; i < TOTAL_ELEMENTS_VO; i++) infile >> v[i];
+        for(int i = 0; i < TOTAL_ELEMENTS_VO/(ATTN_B*ATTN_H); i++) infile >> v[i];
         std::cout << "Finished loading V" << std::endl;
-        for(int i = 0; i < TOTAL_ELEMENTS_VO; i++) { infile >> o_ref[i]; }
+        for(int i = 0; i < TOTAL_ELEMENTS_VO/(ATTN_B*ATTN_H); i++) { infile >> o_ref[i]; }
         std::cout << "Finished loading O_REF" << std::endl;
 
         std::cout << "Finished loading file from " << argv[1] << "!" << std::endl;
     }
 
-    /*
     // replicate into heads
     for(int i = 0; i < TOTAL_ELEMENTS_QK; i++) {
         q_bf[i] = __float2bfloat16(q[i % (ATTN_B*ATTN_H)]);
@@ -105,14 +104,6 @@ int main(int argc, char **argv) {
     }
     for(int i = 0; i < TOTAL_ELEMENTS_VO; i++) {
         v_bf[i] = __float2bfloat16(v[i % (ATTN_B*ATTN_H)]);
-    }
-    */
-    for(int i = 0; i < TOTAL_ELEMENTS_QK; i++) {
-        q_bf[i] = __float2bfloat16(q[i]);
-        k_bf[i] = __float2bfloat16(k[i]);
-    }
-    for(int i = 0; i < TOTAL_ELEMENTS_VO; i++) {
-        v_bf[i] = __float2bfloat16(v[i]);
     }
 
     bf16 *d_q, *d_k, *d_v, *d_o; 

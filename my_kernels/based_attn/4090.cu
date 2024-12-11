@@ -7,11 +7,11 @@
 #define TK_COMPILE_BASED
 #endif
 
-#define NUM_WORKERS  (16)
-#define ACTIVE_TILES (8)
-#define NUM_THREADS (NUM_WORKERS*kittens::WARP_THREADS)
-#define D_QK (16)
-#define D_VO (64)
+#define NUM_WORKERS 16
+#define ACTIVE_TILES 8
+#define NUM_THREADS NUM_WORKERS*kittens::WARP_THREADS
+#define D_QK 16
+#define D_VO 64
 
 using namespace kittens;
 
@@ -87,7 +87,7 @@ void based_linear_attention(const __grid_constant__ based_globals g) {
         }
         else {
             cur_idx = block*ACTIVE_TILES + warpid - ACTIVE_TILES;
-            load(v_s[warpid-8], g.v, {batch, head, cur_idx, 0});
+            load(v_s[warpid-ACTIVE_TILES], g.v, {batch, head, cur_idx, 0});
         }
         __syncthreads();
 

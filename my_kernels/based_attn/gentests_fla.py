@@ -38,7 +38,7 @@ def pytorch_test_fla(
         scale = q.shape[-1] ** -0.5
     q = q * scale
     attn = q @ k.transpose(-2, -1)
-    attn = 1 + attn + 1/2 * (attn ** 2)
+    #attn = 1 + attn + 1/2 * (attn ** 2)
     attn.masked_fill_(~torch.tril(torch.ones(
         q.shape[-2], q.shape[-2], dtype=torch.bool, device=q.device)), 0)
     o = attn @ v

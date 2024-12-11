@@ -40,25 +40,6 @@ struct based_globals {
     long unsigned int n;
 };
 
-template<kittens::ducks::st::all ST, int N_TILES>
-__device__ void accumulate_a0(ST (&o)[N_TILES], sv_fl<ST::cols> &running_sum, const ST (&v)[N_TILES]) {
-    float acc;
-
-    if(threadIdx.x < ST::cols) {
-        int col = threadIdx.x;
-        acc = running_sum[col]; 
-        #pragma unroll
-        for(int t = 0; t < N_TILES; t++) {
-            #pragma unroll
-            for(int i = 0; i < ST::rows; i++) {
-                acc += __bfloat162float(v[t][int2{i, col}]);
-                o[t][int2{i, col}] += __float2bfloat16(acc);
-            }
-        }
-        running_sum[col] = acc;
-    }
-}
-
 template<int WORKERS, kittens::ducks::st::all ST, int N_TILES>
 __device__ inline void cumsum_inplace(ST (&x)[N_TILES], int total_block_idx) {
     constexpr int STRIDE = WORKERS*kittens::WARP_THREADS;
@@ -68,51 +49,6 @@ __device__ inline void cumsum_inplace(ST (&x)[N_TILES], int total_block_idx) {
         for(int j = threadIdx.x; j < ST::num_elements; j+=STRIDE) {
             x[(total_block_idx+i)%N_TILES].data[j] += x[(total_block_idx+i-1)%N_TILES].data[j];
         }
-    }
-}
-
-
-template<int WORKERS, kittens::ducks::st::all ST, int N_TILES>
-__device__ inline void tile_reduce(ST &dst, const ST (&src)[N_TILES]) {
-    constexpr int STRIDE = WORKERS*kittens::WARP_THREADS;
-    constexpr int RESPONSIBLE_ELEMENTS = ST::num_elements / STRIDE;
-    float acc[RESPONSIBLE_ELEMENTS];
-    #pragma unroll
-    for(int j = 0; j < RESPONSIBLE_ELEMENTS; j++) {
-        int idx = threadIdx.x + j*STRIDE;
-        acc[j] = __bfloat162float(dst.data[idx]);
-    }
-
-    for(int i = 0; i < N_TILES; i++) {
-        #pragma unroll
-        for(int j = 0; j < RESPONSIBLE_ELEMENTS; j++) {
-            int idx = threadIdx.x + j*STRIDE;
-            acc[j] += __bfloat162float(src[i].data[idx]); 
-        }
-    }
-    #pragma unroll
-    for(int j = 0; j < RESPONSIBLE_ELEMENTS; j++) {
-        int idx = threadIdx.x + j*STRIDE;
-        dst.data[idx] = __float2bfloat16(acc[j]);
-    }
-}
-
-__device__ static void mul_slice(rt_bf<16, 16> &reg) {
-
-    const int target_col = kittens::warpid();
-    const int lane       = kittens::laneid();
-    
-    #pragma unroll
-    for(int row_offset = 0; row_offset < 2; row_offset++) {
-        const int src_thread = (lane / 4)*4 + (target_col%8)/2;
-        const int col_offset = target_col >= 8;
-        bf16_2 src_val = reg.tiles[0][0].data[2*col_offset + row_offset];
-        bf16 val = __shfl_sync(kittens::MASK_ALL, (target_col%2 == 0) ? src_val.x : src_val.y, src_thread);
-
-        val *= __float2bfloat16(0.70710678118); // sqrt(2)/2
-
-        reg.tiles[0][0].data[row_offset] *= bf16_2{val, val};
-        reg.tiles[0][0].data[row_offset+2] *= bf16_2{val, val};
     }
 }
 
@@ -133,28 +69,19 @@ void based_linear_attention(const __grid_constant__ based_globals g) {
     st_bf<16,64> (&v_s)[ACTIVE_TILES]   = al.allocate<st_bf<16,64>, ACTIVE_TILES>();
     st_bf<16,64> (&o_s)[ACTIVE_TILES]   = al.allocate<st_bf<16,64>, ACTIVE_TILES>();
 
-    st_bf<16, 64> (&a1_s)[ACTIVE_TILES + 1]  = al.allocate<st_bf<16, 64>, ACTIVE_TILES + 1>();
-    st_bf<16, 64> (&a2_o_accum)[NUM_WORKERS] = al.allocate<st_bf<16, 64>, NUM_WORKERS>();
+    st_bf<16, 64> (&s_s)[ACTIVE_TILES + 1]  = al.allocate<st_bf<16, 64>, ACTIVE_TILES + 1>();
 
     int total_block_idx = 0; 
 
-    rt_fl<16,64> a2; 
-
-    sv_fl<64> &a0_total = al.allocate<sv_fl<64>>();
-
-    if (warpid == 0) {
-        zero(a0_total);
-    }
     if (warpid < ACTIVE_TILES + 1) {
-        zero(a1_s[warpid]);
+        zero(s_s[warpid]);
     }
-    zero(a2); 
 
     int n_blocks = g.n / (ACTIVE_TILES * kittens::TILE_ROW_DIM<bf16>);
 
     for (int block = 0; block < n_blocks; block++) {
         rt_bf<16, 16> q, k, local_attn_bf; 
-        rt_fl<16, 16> local_attn, temp_attn_accum;
+        rt_fl<16, 16> local_attn;
         rt_bf<16, 64> v; 
         rt_fl<16, 64> o, accum; 
 
@@ -177,13 +104,7 @@ void based_linear_attention(const __grid_constant__ based_globals g) {
             zero(local_attn);
             mma_ABt(local_attn, q, k, local_attn);
 
-            copy(temp_attn_accum, local_attn);
-
-            mul(temp_attn_accum, temp_attn_accum, temp_attn_accum);
-            mul(temp_attn_accum, temp_attn_accum, 0.5f); 
-            add(temp_attn_accum, temp_attn_accum, local_attn);
-
-            copy(local_attn_bf, temp_attn_accum);
+            copy(local_attn_bf, local_attn);
             make_causal(local_attn_bf, local_attn_bf, kittens::base_types::constants<bf16>::zero());
 
             load(v, v_s[warpid]);
@@ -195,58 +116,29 @@ void based_linear_attention(const __grid_constant__ based_globals g) {
             zero(accum);
             auto &kt = transpose_inplace(k);
             mma_AB(accum, kt, v_col, accum);
-            store(a1_s[(total_block_idx+warpid+1)%(ACTIVE_TILES+1)], accum);
+            store(s_s[(total_block_idx+warpid+1)%(ACTIVE_TILES+1)], accum);
         }
 
         __syncthreads();
-        cumsum_inplace<NUM_WORKERS>(a1_s, total_block_idx);
+        cumsum_inplace<NUM_WORKERS>(s_s, total_block_idx);
         __syncthreads();
 
         if(warpid < ACTIVE_TILES) {
-            rt_bf<16, 64> a1;
+            rt_bf<16, 64> s;
             load(q, q_s[warpid]); 
-            load(a1, a1_s[(total_block_idx+warpid)%(ACTIVE_TILES+1)]);
-            auto &a1_col = swap_layout_inplace(a1);
-            mma_AB(o, q, a1_col, o); 
+            load(s, s_s[(total_block_idx+warpid)%(ACTIVE_TILES+1)]);
+            auto &s_col = swap_layout_inplace(s);
+            mma_AB(o, q, s_col, o); 
             store(o_s[warpid], o);
         }
         total_block_idx = (total_block_idx+ACTIVE_TILES)%(ACTIVE_TILES+1); // count backwards on the ring
         __syncthreads();
-
-        for(int t = 0; t < ACTIVE_TILES; t++) {
-            load(q, q_s[t]);
-            mul_slice(q);
-
-            rt_bf<16, 64> a2_bf;
-            copy(a2_bf, a2);
-            auto &a2_bf_col = swap_layout_inplace(a2_bf);
-            zero(o);
-            mma_AB(o, q, a2_bf_col, o);
-
-            load(k, k_s[t]);
-            mul_slice(k);
-            auto &kt = transpose_inplace(k);
-
-            load(v, v_s[t]);
-            auto &v_col = swap_layout_inplace(v);
-            mma_AB(a2, kt, v_col, a2);
-
-            store(a2_o_accum[warpid], o);
-
-            __syncthreads();
-            tile_reduce<NUM_WORKERS>(o_s[t], a2_o_accum);
-            __syncthreads();
-        }
-
-        accumulate_a0(o_s, a0_total, v_s);
-        __syncthreads();
-
+        
         if(warpid < ACTIVE_TILES) {
             store(g.o, o_s[warpid], {batch, head, cur_idx, 0});
         }
         __syncthreads();
     }
-
 }
 
 based_globals based_init(
@@ -331,9 +223,6 @@ std::tuple<torch::Tensor, torch::Tensor> based(
 
     // allocate output
     torch::Tensor out = torch::empty({B, H, N, DV}, v.options());
-    torch::Tensor kv_a0 = torch::empty({B, H, 1,  DV}, v.options());
-    torch::Tensor kv_a1 = torch::empty({B, H, DV, FD}, v.options());
-    torch::Tensor kv_a2 = torch::empty({B, H, FD*FD, DV}, v.options());
 
     // convert to bf16
     c10::BFloat16 *q_bf16 = q.data_ptr<c10::BFloat16>();
@@ -344,20 +233,14 @@ std::tuple<torch::Tensor, torch::Tensor> based(
     bf16 *d_k = reinterpret_cast<bf16*>(k_bf16);
     bf16 *d_v = reinterpret_cast<bf16*>(v_bf16);
     bf16 *d_o = reinterpret_cast<bf16*>(out.data_ptr<c10::BFloat16>());
-    bf16 *d_kv_a0 = reinterpret_cast<bf16*>(kv_a0.data_ptr<c10::BFloat16>());
-    bf16 *d_kv_a1 = reinterpret_cast<bf16*>(kv_a1.data_ptr<c10::BFloat16>());
-    bf16 *d_kv_a2 = reinterpret_cast<bf16*>(kv_a2.data_ptr<c10::BFloat16>());
 
     dispatch_based(
         d_q, d_k, d_v, d_o,
         B, H, N
     );
 
-    kv_a1 = kv_a1.transpose(2, 3);
-    torch::Tensor kv_concat = torch::cat({kv_a0, kv_a1, kv_a2}, /*dim=*/2);
-
     CHECK_CUDA_ERROR(cudaGetLastError());
-    return std::make_tuple(out, kv_concat);
+    return std::make_tuple(out);
     cudaDeviceSynchronize();
 }
 #else

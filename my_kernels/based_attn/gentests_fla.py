@@ -44,7 +44,7 @@ def pytorch_test_fla(
     o = attn @ v
     return o
 
-o = pytorch_test_fla(q, k, v)
+o = pytorch_test_fla(q, k, v, scale=True)
 
 with open(f'{TESTNAME}_{B}x{H}x{N}x{D}x{DV}.txt', 'w') as f:
     qf = q.to(torch.float32).flatten().cpu().numpy().tolist()

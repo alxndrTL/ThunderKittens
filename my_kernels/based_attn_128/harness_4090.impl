@@ -6,18 +6,17 @@ constexpr int ATTN_B = 1;
 constexpr int ATTN_H = 1;
 constexpr int ATTN_N = 1024;
 constexpr int ATTN_D = 64; // hardcoded into this kernel
-constexpr int ATTN_D_SMALL = 64; // hardcoded into this kernel
 
 long long flops_ref(int B, int N, int H) {
     // number of flops if we did the parallel view (C=L)
-    long long flops = 2*B*H*N*N*D_MODEL + 2*B*H*N*N*D_MODEL; // Q@K.T and (Q@K.T)@V
+    long long flops = 2*B*H*N*N*ATTN_D + 2*B*H*N*N*ATTN_D; // Q@K.T and (Q@K.T)@V
     return flops;
 }
 
 long long flops_real(int B, int N, int H) {
     int chunk_size = ACTIVE_TILES * ROWS;
     int n_chunks = N / chunk_size;
-    long long flops = n_chunks * (2*B*H*chunk_size*chunk_size*D_MODEL + 2*B*H*chunk_size*chunk_size*D_MODEL); // note: idk how close it is to real
+    long long flops = n_chunks * (2*B*H*chunk_size*chunk_size*ATTN_D + 2*B*H*chunk_size*chunk_size*ATTN_D); // note: idk how close it is to real
     return flops;
 }
 
@@ -55,7 +54,7 @@ int main(int argc, char **argv) {
     std::cout << "Entered main!" << std::endl;
 
     // create dummy variables that are the right size
-    constexpr int TOTAL_ELEMENTS_QK = ATTN_B*ATTN_H*ATTN_N*ATTN_D_SMALL;
+    constexpr int TOTAL_ELEMENTS_QK = ATTN_B*ATTN_H*ATTN_N*ATTN_D;
     constexpr int TOTAL_ELEMENTS_VO = ATTN_B*ATTN_H*ATTN_N*ATTN_D;
 
     // create pointers

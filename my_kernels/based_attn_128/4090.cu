@@ -7,25 +7,30 @@
 #define TK_COMPILE_BASED
 #endif
 
+//RTX4090
+//D_MODEL=16 => NUM_WORKERS 16 ACTIVE_TILES 8 is ok
+//D_MODEL=64 => NUM_WORKERS 8 ACTIVE_TILES 4 is ok
+
 #define NUM_WORKERS 8 //16
 #define ACTIVE_TILES 4 //8
 #define NUM_THREADS NUM_WORKERS*kittens::WARP_THREADS
-#define D_QK 16
-#define D_VO 64
+
+#define ROWS 16
+#define D_MODEL 64
 
 using namespace kittens;
 
 struct based_globals { 
-    using q_tile = st_bf<16, D_VO>;
-    using k_tile = st_bf<16, D_VO>;
-    using v_tile = st_bf<16, D_VO>;
-    using o_tile = st_bf<16, D_VO>;
+    using q_tile = st_bf<ROWS, D_MODEL>;
+    using k_tile = st_bf<ROWS, D_MODEL>;
+    using v_tile = st_bf<ROWS, D_MODEL>;
+    using o_tile = st_bf<ROWS, D_MODEL>;
 
     // global layouts
-    using q_gl     = gl<bf16,  -1, -1, -1, D_VO, q_tile>;
-    using k_gl     = gl<bf16,  -1, -1, -1, D_VO, k_tile>;
-    using v_gl     = gl<bf16,  -1, -1, -1, D_VO, v_tile>;
-    using o_gl     = gl<bf16,  -1, -1, -1, D_VO, o_tile>;
+    using q_gl     = gl<bf16,  -1, -1, -1, D_MODEL, q_tile>;
+    using k_gl     = gl<bf16,  -1, -1, -1, D_MODEL, k_tile>;
+    using v_gl     = gl<bf16,  -1, -1, -1, D_MODEL, v_tile>;
+    using o_gl     = gl<bf16,  -1, -1, -1, D_MODEL, o_tile>;
 
     // pointers
     q_gl q;
@@ -59,10 +64,10 @@ void based_linear_attention(const __grid_constant__ based_globals g) {
     extern __shared__ alignment_dummy __shm[]; 
     shared_allocator al((int*)&__shm[0]);
 
-    st_bf<16,64> (&qo_s)[ACTIVE_TILES]   = al.allocate<st_bf<16,64>, ACTIVE_TILES>();
-    st_bf<16,64> (&k_s)[ACTIVE_TILES]   = al.allocate<st_bf<16,64>, ACTIVE_TILES>();
-    st_bf<16,64> (&v_s)[ACTIVE_TILES]   = al.allocate<st_bf<16,64>, ACTIVE_TILES>();
-    st_bf<64,64> (&s_s)[ACTIVE_TILES + 1]  = al.allocate<st_bf<64, 64>, ACTIVE_TILES + 1>();
+    st_bf<ROWS, D_MODEL> (&qo_s)[ACTIVE_TILES]   = al.allocate<st_bf<ROWS, D_MODEL>, ACTIVE_TILES>();
+    st_bf<ROWS, D_MODEL> (&k_s)[ACTIVE_TILES]   = al.allocate<st_bf<ROWS, D_MODEL>, ACTIVE_TILES>();
+    st_bf<ROWS, D_MODEL> (&v_s)[ACTIVE_TILES]   = al.allocate<st_bf<ROWS, D_MODEL>, ACTIVE_TILES>();
+    st_bf<D_MODEL, D_MODEL> (&s_s)[ACTIVE_TILES + 1]  = al.allocate<st_bf<D_MODEL, D_MODEL>, ACTIVE_TILES + 1>();
 
     int total_block_idx = 0;
 
@@ -70,16 +75,16 @@ void based_linear_attention(const __grid_constant__ based_globals g) {
         zero(s_s[warpid]);
     }
 
-    int n_blocks = g.n / (ACTIVE_TILES * kittens::TILE_ROW_DIM<bf16>);
+    int n_blocks = g.n / (ACTIVE_TILES * ROWS);
 
     for (int block = 0; block < n_blocks; block++) {
-        rt_bf<16, 64> q, k;
-        rt_bf<64, 16> kt;
-        rt_bf<16, 16> local_attn_bf;
-        rt_fl<16, 16> local_attn;
-        rt_bf<16, 64> v;
-        rt_fl<64, 64> accum;
-        rt_fl<16, 64> o;
+        rt_bf<ROWS, D_MODEL> q, k;
+        rt_bf<D_MODEL, ROWS> kt;
+        rt_bf<ROWS, ROWS> local_attn_bf;
+        rt_fl<ROWS, ROWS> local_attn;
+        rt_bf<ROWS, D_MODEL> v;
+        rt_fl<D_MODEL, D_MODEL> accum;
+        rt_fl<ROWS, D_MODEL> o;
 
         int cur_idx;
         if(warpid < ACTIVE_TILES) {
@@ -120,7 +125,7 @@ void based_linear_attention(const __grid_constant__ based_globals g) {
         __syncthreads();
 
         if(warpid < ACTIVE_TILES) {
-            rt_bf<64, 64> s;
+            rt_bf<D_MODEL, D_MODEL> s;
             load(q, qo_s[warpid]); 
             load(s, s_s[(total_block_idx+warpid)%(ACTIVE_TILES+1)]); // could define s with col_l directly?
             auto &s_col = swap_layout_inplace(s);

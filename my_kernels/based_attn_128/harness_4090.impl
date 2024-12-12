@@ -10,14 +10,14 @@ constexpr int ATTN_D_SMALL = 64; // hardcoded into this kernel
 
 long long flops_ref(int B, int N, int H) {
     // number of flops if we did the parallel view (C=L)
-    long long flops = 2*B*H*N*N*D_QK + 2*B*H*N*N*D_VO; // Q@K.T and (Q@K.T)@V
+    long long flops = 2*B*H*N*N*D_MODEL + 2*B*H*N*N*D_MODEL; // Q@K.T and (Q@K.T)@V
     return flops;
 }
 
 long long flops_real(int B, int N, int H) {
-    int chunk_size = ACTIVE_TILES * kittens::TILE_ROW_DIM<bf16>;
+    int chunk_size = ACTIVE_TILES * ROWS;
     int n_chunks = N / chunk_size;
-    long long flops = n_chunks * (2*B*H*chunk_size*chunk_size*D_QK + 2*B*H*chunk_size*chunk_size*D_VO); // note: idk how close it is to real
+    long long flops = n_chunks * (2*B*H*chunk_size*chunk_size*D_MODEL + 2*B*H*chunk_size*chunk_size*D_MODEL); // note: idk how close it is to real
     return flops;
 }
 

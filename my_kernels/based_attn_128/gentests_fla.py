@@ -10,8 +10,8 @@ import math
 B = 1
 H = 1
 N = 1024
-D = 32
-DV = 32
+D = 64
+DV = 64
 
 TESTNAME = sys.argv[1]
 

@@ -7,30 +7,25 @@
 #define TK_COMPILE_BASED
 #endif
 
-#define NUM_WORKERS 16
-#define ACTIVE_TILES 8
+#define NUM_WORKERS 8 //16
+#define ACTIVE_TILES 4 //8
 #define NUM_THREADS NUM_WORKERS*kittens::WARP_THREADS
 #define D_QK 16
-#define D_VO 16
-
-#define FD 64
-#define BD 16
-
-//maybe : raise BD as well as the "16"? to match the usage of the original kernel
+#define D_VO 64
 
 using namespace kittens;
 
 struct based_globals { 
-    using q_tile = st_bf<16, BD>;
-    using k_tile = st_bf<16, BD>;
-    using v_tile = st_bf<16, BD>;
-    using o_tile = st_bf<16, BD>;
+    using q_tile = st_bf<16, D_VO>;
+    using k_tile = st_bf<16, D_VO>;
+    using v_tile = st_bf<16, D_VO>;
+    using o_tile = st_bf<16, D_VO>;
 
     // global layouts
-    using q_gl     = gl<bf16,  -1, -1, -1, FD, q_tile>;
-    using k_gl     = gl<bf16,  -1, -1, -1, FD, k_tile>;
-    using v_gl     = gl<bf16,  -1, -1, -1, FD, v_tile>;
-    using o_gl     = gl<bf16,  -1, -1, -1, FD, o_tile>;
+    using q_gl     = gl<bf16,  -1, -1, -1, D_VO, q_tile>;
+    using k_gl     = gl<bf16,  -1, -1, -1, D_VO, k_tile>;
+    using v_gl     = gl<bf16,  -1, -1, -1, D_VO, v_tile>;
+    using o_gl     = gl<bf16,  -1, -1, -1, D_VO, o_tile>;
 
     // pointers
     q_gl q;
@@ -56,24 +51,20 @@ __device__ inline void cumsum_inplace(ST (&x)[N_TILES], int total_block_idx) {
 __global__ __launch_bounds__(NUM_THREADS, 1)
 void based_linear_attention(const __grid_constant__ based_globals g) {
 
+    const int batch = blockIdx.y;
+    const int head  = blockIdx.x;
+
     int warpid = kittens::warpid(); 
-
-    const int batch = blockIdx.z;
-    const int head  = blockIdx.y;
-    const int dim = blockIdx.x * BD; // 0, 1, 2 or 3
-
-    //printf("%d\n", dim);
 
     extern __shared__ alignment_dummy __shm[]; 
     shared_allocator al((int*)&__shm[0]);
 
-    st_bf<16,BD> (&q_s)[ACTIVE_TILES]   = al.allocate<st_bf<16,BD>, ACTIVE_TILES>();
-    st_bf<16,BD> (&k_s)[ACTIVE_TILES]   = al.allocate<st_bf<16,BD>, ACTIVE_TILES>();
-    st_bf<16,BD> (&v_s)[ACTIVE_TILES]   = al.allocate<st_bf<16,BD>, ACTIVE_TILES>();
-    st_bf<16,BD> (&o_s)[ACTIVE_TILES]   = al.allocate<st_bf<16,BD>, ACTIVE_TILES>();
-    st_bf<16, BD> (&s_s)[ACTIVE_TILES + 1]  = al.allocate<st_bf<16,BD>, ACTIVE_TILES + 1>();
+    st_bf<16,64> (&qo_s)[ACTIVE_TILES]   = al.allocate<st_bf<16,64>, ACTIVE_TILES>();
+    st_bf<16,64> (&k_s)[ACTIVE_TILES]   = al.allocate<st_bf<16,64>, ACTIVE_TILES>();
+    st_bf<16,64> (&v_s)[ACTIVE_TILES]   = al.allocate<st_bf<16,64>, ACTIVE_TILES>();
+    st_bf<64,64> (&s_s)[ACTIVE_TILES + 1]  = al.allocate<st_bf<64, 64>, ACTIVE_TILES + 1>();
 
-    int total_block_idx = 0; 
+    int total_block_idx = 0;
 
     if (warpid < ACTIVE_TILES + 1) {
         zero(s_s[warpid]);
@@ -82,25 +73,28 @@ void based_linear_attention(const __grid_constant__ based_globals g) {
     int n_blocks = g.n / (ACTIVE_TILES * kittens::TILE_ROW_DIM<bf16>);
 
     for (int block = 0; block < n_blocks; block++) {
-        rt_bf<16, BD> q, k, local_attn_bf; 
-        rt_fl<16, BD> local_attn;
-        rt_bf<16, BD> v; 
-        rt_fl<16, BD> o, accum; 
+        rt_bf<16, 64> q, k;
+        rt_bf<64, 16> kt;
+        rt_bf<16, 16> local_attn_bf;
+        rt_fl<16, 16> local_attn;
+        rt_bf<16, 64> v;
+        rt_fl<64, 64> accum;
+        rt_fl<16, 64> o;
 
         int cur_idx;
         if(warpid < ACTIVE_TILES) {
             cur_idx = block*ACTIVE_TILES + warpid;
-            load(q_s[warpid], g.q, {batch, head, cur_idx, dim});
-            load(k_s[warpid], g.k, {batch, head, cur_idx, dim});
+            load(qo_s[warpid], g.q, {batch, head, cur_idx, 0});
+            load(k_s[warpid], g.k, {batch, head, cur_idx, 0});
         }
         else {
             cur_idx = block*ACTIVE_TILES + warpid - ACTIVE_TILES;
-            load(v_s[warpid-ACTIVE_TILES], g.v, {batch, head, cur_idx, dim});
+            load(v_s[warpid-ACTIVE_TILES], g.v, {batch, head, cur_idx, 0});
         }
         __syncthreads();
 
         if(warpid < ACTIVE_TILES) {
-            load(q, q_s[warpid]);
+            load(q, qo_s[warpid]);
             load(k, k_s[warpid]);
 
             zero(local_attn);
@@ -116,7 +110,7 @@ void based_linear_attention(const __grid_constant__ based_globals g) {
             mma_AB(o, local_attn_bf, v_col, o);
 
             zero(accum);
-            auto &kt = transpose_inplace(k);
+            transpose_sep(kt, k);
             mma_AB(accum, kt, v_col, accum);
             store(s_s[(total_block_idx+warpid+1)%(ACTIVE_TILES+1)], accum);
         }
@@ -126,18 +120,18 @@ void based_linear_attention(const __grid_constant__ based_globals g) {
         __syncthreads();
 
         if(warpid < ACTIVE_TILES) {
-            rt_bf<16, BD> s;
-            load(q, q_s[warpid]); 
+            rt_bf<64, 64> s;
+            load(q, qo_s[warpid]); 
             load(s, s_s[(total_block_idx+warpid)%(ACTIVE_TILES+1)]); // could define s with col_l directly?
             auto &s_col = swap_layout_inplace(s);
             mma_AB(o, q, s_col, o); 
-            store(o_s[warpid], o);
+            store(qo_s[warpid], o);
         }
         total_block_idx = (total_block_idx+ACTIVE_TILES)%(ACTIVE_TILES+1); // count backwards on the ring
         __syncthreads();
         
         if(warpid < ACTIVE_TILES) {
-            store(g.o, o_s[warpid], {batch, head, cur_idx, dim});
+            store(g.o, qo_s[warpid], {batch, head, cur_idx, 0});
         }
         __syncthreads();
     }

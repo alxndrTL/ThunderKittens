@@ -4,7 +4,7 @@
 #include <tuple>
 
 #ifdef TORCH_COMPILE
-#define TK_COMPILE_BASED
+#define TK_COMPILE_LIN_ATTN
 #endif
 
 //RTX4090
@@ -17,21 +17,21 @@
 #define NUM_THREADS NUM_WORKERS*kittens::WARP_THREADS
 
 #define ROWS 16
-#define D 64
+#define ATTN_D 64
 
 using namespace kittens;
 
 struct based_globals {
-    using q_tile = st_bf<ROWS, D>;
-    using k_tile = st_bf<ROWS, D>;
-    using v_tile = st_bf<ROWS, D>;
-    using o_tile = st_bf<ROWS, D>;
+    using q_tile = st_bf<ROWS, ATTN_D>;
+    using k_tile = st_bf<ROWS, ATTN_D>;
+    using v_tile = st_bf<ROWS, ATTN_D>;
+    using o_tile = st_bf<ROWS, ATTN_D>;
 
     // global layouts
-    using q_gl     = gl<bf16,  -1, -1, -1, D, q_tile>;
-    using k_gl     = gl<bf16,  -1, -1, -1, D, k_tile>;
-    using v_gl     = gl<bf16,  -1, -1, -1, D, v_tile>;
-    using o_gl     = gl<bf16,  -1, -1, -1, D, o_tile>;
+    using q_gl     = gl<bf16,  -1, -1, -1, ATTN_D, q_tile>;
+    using k_gl     = gl<bf16,  -1, -1, -1, ATTN_D, k_tile>;
+    using v_gl     = gl<bf16,  -1, -1, -1, ATTN_D, v_tile>;
+    using o_gl     = gl<bf16,  -1, -1, -1, ATTN_D, o_tile>;
 
     // pointers
     q_gl q;
@@ -65,10 +65,10 @@ void based_linear_attention(const __grid_constant__ based_globals g) {
     extern __shared__ alignment_dummy __shm[]; 
     shared_allocator al((int*)&__shm[0]);
 
-    st_bf<ROWS, D> (&qo_s)[ACTIVE_TILES]   = al.allocate<st_bf<ROWS, D>, ACTIVE_TILES>();
-    st_bf<ROWS, D> (&k_s)[ACTIVE_TILES]   = al.allocate<st_bf<ROWS, D>, ACTIVE_TILES>();
-    st_bf<ROWS, D> (&v_s)[ACTIVE_TILES]   = al.allocate<st_bf<ROWS, D>, ACTIVE_TILES>();
-    st_bf<D, D> (&s_s)[ACTIVE_TILES + 1]  = al.allocate<st_bf<D, D>, ACTIVE_TILES + 1>();
+    st_bf<ROWS, ATTN_D> (&qo_s)[ACTIVE_TILES]   = al.allocate<st_bf<ROWS, ATTN_D>, ACTIVE_TILES>();
+    st_bf<ROWS, ATTN_D> (&k_s)[ACTIVE_TILES]   = al.allocate<st_bf<ROWS, ATTN_D>, ACTIVE_TILES>();
+    st_bf<ROWS, ATTN_D> (&v_s)[ACTIVE_TILES]   = al.allocate<st_bf<ROWS, ATTN_D>, ACTIVE_TILES>();
+    st_bf<ATTN_D, ATTN_D> (&s_s)[ACTIVE_TILES + 1]  = al.allocate<st_bf<ATTN_D, ATTN_D>, ACTIVE_TILES + 1>();
 
     int total_block_idx = 0;
 
@@ -79,13 +79,13 @@ void based_linear_attention(const __grid_constant__ based_globals g) {
     int n_blocks = g.n / (ACTIVE_TILES * ROWS);
 
     for (int block = 0; block < n_blocks; block++) {
-        rt_bf<ROWS, D> q, k;
-        rt_bf<D, ROWS> kt;
+        rt_bf<ROWS, ATTN_D> q, k;
+        rt_bf<ATTN_D, ROWS> kt;
         rt_bf<ROWS, ROWS> local_attn_bf;
         rt_fl<ROWS, ROWS> local_attn;
-        rt_bf<ROWS, D> v;
-        rt_fl<D, D> accum;
-        rt_fl<ROWS, D> o;
+        rt_bf<ROWS, ATTN_D> v;
+        rt_fl<ATTN_D, ATTN_D> accum;
+        rt_fl<ROWS, ATTN_D> o;
 
         int cur_idx;
         if(warpid < ACTIVE_TILES) {
@@ -126,7 +126,7 @@ void based_linear_attention(const __grid_constant__ based_globals g) {
         __syncthreads();
 
         if(warpid < ACTIVE_TILES) {
-            rt_bf<D, D> s;
+            rt_bf<ATTN_D, ATTN_D> s;
             load(q, qo_s[warpid]); 
             load(s, s_s[(total_block_idx+warpid)%(ACTIVE_TILES+1)]); // could define s with col_l directly?
             auto &s_col = swap_layout_inplace(s);
@@ -173,10 +173,10 @@ based_globals based_init(
     return g;
 }
 
-#ifdef TK_COMPILE_BASED
+#ifdef TK_COMPILE_LIN_ATTN
 #include "pyutils/torch_helpers.cuh"
 #include <iostream>
-void dispatch_based( 
+void dispatch_lin_attn_forward( 
     bf16 *d_q, bf16 *d_k, bf16 *d_v, bf16 *d_o,
     int ATTN_B, int ATTN_H, int ATTN_N
 ){
@@ -199,7 +199,7 @@ void dispatch_based(
     cudaDeviceSynchronize();
 }
 
-std::tuple<torch::Tensor, torch::Tensor> based(
+torch::Tensor lin_attn_forward(
     const torch::Tensor q, 
     const torch::Tensor k,
     const torch::Tensor v
@@ -236,15 +236,17 @@ std::tuple<torch::Tensor, torch::Tensor> based(
     bf16 *d_v = reinterpret_cast<bf16*>(v_bf16);
     bf16 *d_o = reinterpret_cast<bf16*>(out.data_ptr<c10::BFloat16>());
 
-    dispatch_based(
+    dispatch_lin_attn_forward(
         d_q, d_k, d_v, d_o,
         B, H, N
     );
 
     CHECK_CUDA_ERROR(cudaGetLastError());
-    return std::make_tuple(out);
+    return out;
     cudaDeviceSynchronize();
 }
+
+
 #else
 #include "harness_4090.impl"
 #endif

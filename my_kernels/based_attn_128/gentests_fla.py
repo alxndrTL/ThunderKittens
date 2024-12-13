@@ -7,11 +7,11 @@ import math
 
 B = 1 # keep 1
 H = 1 # keep 1
-N = 16384
+N = 8192*2
 D = 64
 DV = 64
 
-TESTNAME = sys.argv[1]
+TESTNAME = sys.argv[1] if len(sys.argv) > 1 else 'randn_all'
 
 if TESTNAME in ['ones_all', 'ones_t0', 'ones_t1', 'ones_t0t1', 'ones_t2']:
     q = (torch.ones((B, H, N, D), dtype=torch.bfloat16, device='cuda')/D).to(torch.float32)

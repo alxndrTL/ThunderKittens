@@ -5,7 +5,10 @@
 *.cubin
 *.fatbin
 __pycache__/
+build/
+dist/
 */printouts/*
 *.txt
 *.d
 *_fwd
+*.egg-info

@@ -4,8 +4,7 @@
 
 constexpr int ATTN_B = 16;
 constexpr int ATTN_H = 12;
-constexpr int ATTN_N = 16384;
-constexpr int ATTN_D = D;
+constexpr int ATTN_N = 1024*2*2*2*2;
 
 long long flops_ref(int B, int N, int H) {
     // number of flops if we did the parallel view (C=L)

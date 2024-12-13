@@ -2,7 +2,7 @@ import sys
 import time
 
 import torch
-from fla.ops.linear_attn.fused_chunk import fused_chunk_linear_attn
+import thunderkittens as tk
 
 B=16
 H=12
@@ -16,11 +16,12 @@ k = (torch.randn((B, H, N, D), dtype=torch.bfloat16, device='cuda')/float(D)**.5
 v = (torch.randn((B, H, N, D), dtype=torch.bfloat16, device='cuda')/D)
 
 # warmup
-o = fused_chunk_linear_attn(q, k, v, scale=1)
+o = tk.lin_attn(q, k, v)
+
 
 st = time.time()
 for _ in range(iters):
-    o = fused_chunk_linear_attn(q, k, v, scale=1)
+    o = tk.lin_attn(q, k, v)
 et = time.time()
 
 dt = (et - st)/iters

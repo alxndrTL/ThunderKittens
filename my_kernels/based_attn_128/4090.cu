@@ -21,7 +21,7 @@
 
 using namespace kittens;
 
-struct based_globals { 
+struct based_globals {
     using q_tile = st_bf<ROWS, D>;
     using k_tile = st_bf<ROWS, D>;
     using v_tile = st_bf<ROWS, D>;

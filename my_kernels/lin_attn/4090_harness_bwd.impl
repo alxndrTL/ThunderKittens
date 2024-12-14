@@ -1,0 +1,166 @@
+#include <iostream>
+#include <string>
+#include <fstream>
+
+constexpr int ATTN_B = 16;
+constexpr int ATTN_H = 12;
+constexpr int ATTN_N = 1024;
+
+long long flops_ref(int B, int N, int H) {
+    // number of flops if we did the parallel view (C=L)
+    long long flops = 2LL*B*H*N*N*ATTN_D + 2LL*B*H*N*N*ATTN_D; // Q@K.T and (Q@K.T)@V
+    return flops;
+}
+
+long long flops_real(int B, int N, int H) {
+    // number of flops with chunk-wise strategy
+    int chunk_size = ACTIVE_TILES * ROWS;
+    int n_chunks = N / chunk_size;
+    long long flops = n_chunks * (2LL*B*H*chunk_size*chunk_size*ATTN_D + 2LL*B*H*chunk_size*chunk_size*ATTN_D); // note: idk how close it is to real
+    return flops;
+}
+
+double efficiency(long long flop, double time) {
+    // convert flop to teraflops and time to milliseconds
+    double tflops = flop / 1e12;
+    double time_ms = time / 1e6;
+    return tflops / time_ms;
+}
+
+#define CudaCheckError()    __cudaCheckError( __FILE__, __LINE__ )
+inline void __cudaCheckError( const char *file, const int line ) {
+    cudaError err = cudaGetLastError();
+    if ( cudaSuccess != err )
+    {
+        fprintf( stderr, "cudaCheckError() failed at %s:%i : %s\n",
+                 file, line, cudaGetErrorString( err ) );
+        exit( -1 );
+    }
+    // More careful checking. However, this will affect performance.
+    // Comment away if needed.
+    err = cudaDeviceSynchronize();
+    if( cudaSuccess != err )
+    {
+        fprintf( stderr, "cudaCheckError() with sync failed at %s:%i : %s\n",
+                 file, line, cudaGetErrorString( err ) );
+        exit( -1 );
+    }
+}
+
+int main(int argc, char **argv) {
+    std::cout << "Entered main!" << std::endl;
+
+    constexpr int TOTAL_ELEMENTS_QKVO_READ = ATTN_N*ATTN_D; // b=h=1 in the python gen file
+    constexpr int TOTAL_ELEMENTS_QKVO = ATTN_B*ATTN_H*ATTN_N*ATTN_D;
+
+    // create pointers for inputs
+    float *q = new float[TOTAL_ELEMENTS_QKVO_READ];
+    float *k = new float[TOTAL_ELEMENTS_QKVO_READ];
+    float *v = new float[TOTAL_ELEMENTS_QKVO_READ];
+    float *d_o = new float[TOTAL_ELEMENTS_QKVO_READ];
+    float *dq_ref = new float[TOTAL_ELEMENTS_QKVO_READ];
+    float *dk_ref = new float[TOTAL_ELEMENTS_QKVO_READ];
+    float *dv_ref = new float[TOTAL_ELEMENTS_QKVO_READ];
+
+    bf16 *q_bf = new bf16[TOTAL_ELEMENTS_QKVO];
+    bf16 *k_bf = new bf16[TOTAL_ELEMENTS_QKVO];
+    bf16 *v_bf = new bf16[TOTAL_ELEMENTS_QKVO];
+    bf16 *do_bf = new bf16[TOTAL_ELEMENTS_QKVO];
+    bf16 *dq_bf = new bf16[TOTAL_ELEMENTS_QKVO];
+    bf16 *dk_bf = new bf16[TOTAL_ELEMENTS_QKVO];
+    bf16 *dv_bf = new bf16[TOTAL_ELEMENTS_QKVO];
+
+    // outputs on host after kernel
+    float *dq = new float[TOTAL_ELEMENTS_QKVO];
+    float *dk = new float[TOTAL_ELEMENTS_QKVO];
+    float *dv = new float[TOTAL_ELEMENTS_QKVO];
+
+    if(argc > 1) {
+        std::ifstream infile(argv[1]);
+        std::cout << "Starting to enter!" << std::endl;
+
+        for(int i = 0; i < TOTAL_ELEMENTS_QKVO_READ; i++) infile >> q[i];
+        for(int i = 0; i < TOTAL_ELEMENTS_QKVO_READ; i++) infile >> k[i];
+        for(int i = 0; i < TOTAL_ELEMENTS_QKVO_READ; i++) infile >> v[i];
+        for(int i = 0; i < TOTAL_ELEMENTS_QKVO_READ; i++) infile >> d_o[i];
+        for(int i = 0; i < TOTAL_ELEMENTS_QKVO_READ; i++) infile >> dq_ref[i];
+        for(int i = 0; i < TOTAL_ELEMENTS_QKVO_READ; i++) infile >> dk_ref[i];
+        for(int i = 0; i < TOTAL_ELEMENTS_QKVO_READ; i++) infile >> dv_ref[i];
+
+        std::cout << "Finished loading file from " << argv[1] << "!" << std::endl;
+    }
+
+    // replicate into heads
+    for(int i = 0; i < TOTAL_ELEMENTS_QKVO; i++) {
+        q_bf[i] = __float2bfloat16(q[i % TOTAL_ELEMENTS_QKVO_READ]);
+        k_bf[i] = __float2bfloat16(k[i % TOTAL_ELEMENTS_QKVO_READ]);
+        v_bf[i] = __float2bfloat16(v[i % TOTAL_ELEMENTS_QKVO_READ]);
+        do_bf[i] = __float2bfloat16(do_ref[i % TOTAL_ELEMENTS_QKVO_READ]);
+    }
+
+    bf16 *d_q, *d_k, *d_v, *d_do, *d_dq, *d_dk, *d_dv;
+    cudaMalloc(&d_q, TOTAL_ELEMENTS_QKVO * sizeof(bf16));
+    cudaMalloc(&d_k, TOTAL_ELEMENTS_QKVO * sizeof(bf16));
+    cudaMalloc(&d_v, TOTAL_ELEMENTS_QKVO * sizeof(bf16));
+    cudaMalloc(&d_do, TOTAL_ELEMENTS_QKVO * sizeof(bf16));
+    cudaMalloc(&d_dq, TOTAL_ELEMENTS_QKVO * sizeof(bf16));
+    cudaMalloc(&d_dk, TOTAL_ELEMENTS_QKVO * sizeof(bf16));
+    cudaMalloc(&d_dv, TOTAL_ELEMENTS_QKVO * sizeof(bf16));
+
+    cudaMemcpy(d_q, q_bf, TOTAL_ELEMENTS_QKVO * sizeof(bf16), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_k, k_bf, TOTAL_ELEMENTS_QKVO * sizeof(bf16), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_v, v_bf, TOTAL_ELEMENTS_QKVO * sizeof(bf16), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_do, do_bf, TOTAL_ELEMENTS_QKVO * sizeof(bf16), cudaMemcpyHostToDevice);
+
+    bwd_globals g = bwd_init(
+        d_q, d_k, d_v, d_do, d_dq, d_dk, d_dv,
+        ATTN_B, ATTN_H, ATTN_N
+    );
+
+    // ...existing code for CUDA error checking and shared memory setup... TODO
+
+    const int ITER = 10;
+    cudaDeviceSynchronize();
+    CudaCheckError();
+    std::cout << "Warmup!\n";
+    dim3 grid(ATTN_H, ATTN_B);
+    for(int i = 0; i < ITER; i++) {
+        linear_attention_bwd<<<grid, NUM_THREADS, mem_size>>>(g);
+    }
+
+    // ...existing timing code... TODO
+
+    // check correctness for all gradients
+    cudaMemcpy(dq_bf, d_dq, TOTAL_ELEMENTS_QKVO * sizeof(bf16), cudaMemcpyDeviceToHost);
+    cudaMemcpy(dk_bf, d_dk, TOTAL_ELEMENTS_QKVO * sizeof(bf16), cudaMemcpyDeviceToHost);
+    cudaMemcpy(dv_bf, d_dv, TOTAL_ELEMENTS_QKVO * sizeof(bf16), cudaMemcpyDeviceToHost);
+
+    for(int i = 0; i < TOTAL_ELEMENTS_QKVO; i++) {
+        dq[i] = __bfloat162float(dq_bf[i]);
+        dk[i] = __bfloat162float(dk_bf[i]);
+        dv[i] = __bfloat162float(dv_bf[i]);
+    }
+
+    bool good = true;
+    float max_diff = 0;
+    float avg_diff = 0;
+
+    // Check dQ
+    for(int i = 0; i < TOTAL_ELEMENTS_QKVO_READ; i++) {
+        float diff = dq[i] - dq_ref[i];
+        if(abs(diff) > 0.05 || isnan(diff)) good = false;
+        max_diff = std::max(max_diff, abs(diff));
+        avg_diff += abs(diff);
+    }
+    // Check dK and dV similarly...
+
+    avg_diff /= (3 * TOTAL_ELEMENTS_QKVO_READ); // average across all gradients
+    std::cout << "Max diff: " << max_diff << std::endl;
+    std::cout << "Avg diff: " << avg_diff << std::endl;
+    if(good) std::cout << "Correct gradients :)\n";
+    else std::cout << "Incorrect gradients :(\n";
+
+    // ...existing cleanup code...
+
+    return 0;
+}

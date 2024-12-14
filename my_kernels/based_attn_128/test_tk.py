@@ -18,7 +18,6 @@ v = (torch.randn((B, H, N, D), dtype=torch.bfloat16, device='cuda')/D)
 # warmup
 o = tk.lin_attn(q, k, v)
 
-
 st = time.time()
 for _ in range(iters):
     o = tk.lin_attn(q, k, v)

@@ -1,7 +1,7 @@
 # Compiler
 NVCC=nvcc
 
-FWD_HARNESS=1
+FWD_HARNESS=0
 TARGET=lin_attn
 SRC=4090.cu
 

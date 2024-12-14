@@ -21,6 +21,18 @@
 
 using namespace kittens;
 
+template<int WORKERS, kittens::ducks::st::all ST, int N_TILES>
+__device__ inline void cumsum_inplace(ST (&x)[N_TILES], int total_block_idx) {
+    constexpr int STRIDE = WORKERS*kittens::WARP_THREADS;
+
+    for(int i = 1; i < N_TILES; i++) {
+        #pragma unroll
+        for(int j = threadIdx.x; j < ST::num_elements; j+=STRIDE) {
+            x[(total_block_idx+i)%N_TILES].data[j] += x[(total_block_idx+i-1)%N_TILES].data[j];
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------
 // ----------------------------------------- Forward kernel ------------------------------------------
 // ---------------------------------------------------------------------------------------------------
@@ -45,18 +57,6 @@ struct fwd_globals {
 
     long unsigned int n;
 };
-
-template<int WORKERS, kittens::ducks::st::all ST, int N_TILES>
-__device__ inline void cumsum_inplace(ST (&x)[N_TILES], int total_block_idx) {
-    constexpr int STRIDE = WORKERS*kittens::WARP_THREADS;
-
-    for(int i = 1; i < N_TILES; i++) {
-        #pragma unroll
-        for(int j = threadIdx.x; j < ST::num_elements; j+=STRIDE) {
-            x[(total_block_idx+i)%N_TILES].data[j] += x[(total_block_idx+i-1)%N_TILES].data[j];
-        }
-    }
-}
 
 __global__ __launch_bounds__(NUM_THREADS, 1)
 void linear_attention_fwd(const __grid_constant__ fwd_globals g) {
@@ -207,6 +207,199 @@ struct bwd_globals {
     long unsigned int n;
 };
 
+__global__ __launch_bounds__(NUM_THREADS, 1)
+void linear_attention_bwd(const __grid_constant__ bwd_globals g) {
+
+    const int batch = blockIdx.y;
+    const int head  = blockIdx.x;
+
+    int warpid = kittens::warpid(); 
+
+    extern __shared__ alignment_dummy __shm[]; 
+    shared_allocator al((int*)&__shm[0]);
+
+    st_bf<ROWS, ATTN_D> (&dodqqdk_s)[ACTIVE_TILES]   = al.allocate<st_bf<ROWS, ATTN_D>, ACTIVE_TILES>(); // do,dq for 1st loop, q,dk for 2nd loop
+    st_bf<ROWS, ATTN_D> (&k_s)[ACTIVE_TILES]   = al.allocate<st_bf<ROWS, ATTN_D>, ACTIVE_TILES>(); // k for 1st and 2nd
+    st_bf<ROWS, ATTN_D> (&v_s)[ACTIVE_TILES]   = al.allocate<st_bf<ROWS, ATTN_D>, ACTIVE_TILES>(); // v for 1st and 2nd
+    st_bf<ATTN_D, ATTN_D> (&sds_s)[ACTIVE_TILES + 1]  = al.allocate<st_bf<ATTN_D, ATTN_D>, ACTIVE_TILES + 1>(); // s for 1st, ds for 2nd
+    st_bf<ROWS, ATTN_D> (&dodv_s)[ACTIVE_TILES] = al.allocate<st_bf<ROWS, ATTN_D>, ACTIVE_TILES>(); // do,dv for 2nd
+    
+    // first loop : dq
+
+    int total_block_idx = 0;
+
+    if (warpid < ACTIVE_TILES + 1) {
+        zero(sds_s[warpid]);
+    }
+
+    int n_blocks = g.n / (ACTIVE_TILES * ROWS);
+
+    for (int block = 0; block < n_blocks; block++) {
+        rt_bf<ROWS, ATTN_D> d_o, k, v;
+        rt_bf<ATTN_D, ROWS> vt;
+        rt_bf<ROWS, ROWS> local_attn_bf;
+        rt_fl<ROWS, ROWS> local_attn;
+        rt_fl<ATTN_D, ATTN_D> accum;
+        rt_fl<ROWS, ATTN_D> dq;
+
+        int cur_idx;
+        if(warpid < ACTIVE_TILES) {
+            cur_idx = block*ACTIVE_TILES + warpid;
+            load(dodqqdk_s[warpid], g.d_o, {batch, head, cur_idx, 0});
+            load(k_s[warpid], g.k, {batch, head, cur_idx, 0});
+        }
+        else {
+            cur_idx = block*ACTIVE_TILES + warpid - ACTIVE_TILES;
+            load(v_s[warpid-ACTIVE_TILES], g.v, {batch, head, cur_idx, 0});
+        }
+        __syncthreads();
+
+        if(warpid < ACTIVE_TILES) {
+            load(d_o, dodqqdk_s[warpid]);
+            load(v, v_s[warpid]);
+            
+            zero(local_attn);
+            mma_ABt(local_attn, d_o, v, local_attn);
+
+            copy(local_attn_bf, local_attn);
+            make_causal(local_attn_bf, local_attn_bf, kittens::base_types::constants<bf16>::zero());
+
+            load(k, k_s[warpid]);
+            auto &k_col = swap_layout_inplace(k); // could define k with col_l directly?
+
+            zero(dq);
+            mma_AB(dq, local_attn_bf, k_col, dq);
+
+            transpose_sep(vt, v);
+            zero(accum);
+            mma_AB(accum, vt, k_col, accum);
+            store(sds_s[(total_block_idx+warpid+1)%(ACTIVE_TILES+1)], accum);
+        }
+
+        __syncthreads();
+        cumsum_inplace<NUM_WORKERS>(sds_s, total_block_idx);
+        __syncthreads();
+
+        if(warpid < ACTIVE_TILES) {
+            rt_bf<ATTN_D, ATTN_D> s;
+            load(d_o, dodqqdk_s[warpid]); //happens twice no???
+            load(s, sds_s[(total_block_idx+warpid)%(ACTIVE_TILES+1)]); // could define s with col_l directly?
+            auto &s_col = swap_layout_inplace(s);
+            mma_AB(dq, d_o, s_col, dq); 
+            store(dodqqdk_s[warpid], dq);
+        }
+        total_block_idx = (total_block_idx+ACTIVE_TILES)%(ACTIVE_TILES+1); // count backwards on the ring
+        __syncthreads();
+        
+        if(warpid < ACTIVE_TILES) {
+            store(g.dq, dodqqdk_s[warpid], {batch, head, cur_idx, 0});
+        }
+        __syncthreads();
+    }
+
+    // second loop : dk,dv
+
+    total_block_idx = 0;
+
+    if (warpid < ACTIVE_TILES + 1) {
+        zero(sds_s[warpid]);
+    }
+
+    for (int block = n_blocks-1; block >= 0; block--) {
+        rt_bf<ROWS, ATTN_D> d_o, q, k, v;
+        rt_bf<ATTN_D, ROWS> qt;
+        rt_bf<ROWS, ROWS> local_attn_bf;
+        rt_fl<ROWS, ROWS> local_attn;
+        rt_fl<ATTN_D, ATTN_D> accum;
+        rt_fl<ROWS, ATTN_D> dk, dv;
+
+        int cur_idx;
+        if(warpid < ACTIVE_TILES) {
+            cur_idx = block*ACTIVE_TILES + warpid;
+            load(dodqqdk_s[warpid], g.q, {batch, head, cur_idx, 0});
+            load(k_s[warpid], g.k, {batch, head, cur_idx, 0});
+        }
+        else {
+            cur_idx = block*ACTIVE_TILES + warpid - ACTIVE_TILES;
+            load(v_s[warpid-ACTIVE_TILES], g.v, {batch, head, cur_idx, 0});
+            load(dodv_s[warpid-ACTIVE_TILES], g.d_o, {batch, head, cur_idx, 0});
+        }
+        __syncthreads();
+
+        if(warpid < ACTIVE_TILES) {
+            load(d_o, dodv_s[warpid]);
+
+            // first part of dk
+            load(v, v_s[warpid]);
+            
+            zero(local_attn);
+            mma_ABt(local_attn, v, d_o, local_attn);
+
+            copy(local_attn_bf, local_attn);
+            make_causal_t(local_attn_bf, local_attn_bf, kittens::base_types::constants<bf16>::zero());
+
+            load(q, dodqqdk_s[warpid]);
+            auto &q_col = swap_layout_inplace(q); // could define q with col_l directly?
+
+            zero(dk);
+            mma_AB(dk, local_attn_bf, q_col, dk);
+
+            // first part of dv
+            load(k, k_s[warpid]);
+
+            zero(local_attn);
+            mma_ABt(local_attn, k, q, local_attn);
+
+            copy(local_attn_bf, local_attn);
+            make_causal_t(local_attn_bf, local_attn_bf, kittens::base_types::constants<bf16>::zero());
+
+            zero(dv);
+            auto &d_o_col = swap_layout_inplace(d_o);
+            mma_AB(dv, local_attn_bf, d_o_col, dv);
+
+            // ds
+            transpose_sep(qt, q); // todo : instead of transposing, use q_col defined above
+            zero(accum);
+            mma_AB(accum, qt, d_o_col, accum);
+            store(sds_s[(total_block_idx+warpid+1)%(ACTIVE_TILES+1)], accum);
+        }
+
+        __syncthreads();
+        cumsum_inplace<NUM_WORKERS>(sds_s, total_block_idx);
+        __syncthreads();
+
+        if(warpid < ACTIVE_TILES) {
+            rt_bf<ATTN_D, ATTN_D> ds;
+            // second part of dk
+            load(v, v_s[warpid]); //happens twice no???
+            load(ds, sds_s[(total_block_idx+warpid)%(ACTIVE_TILES+1)]);
+            mma_ABt(dk, v, ds, dk); 
+            store(dodqqdk_s[warpid], dk);
+        } // TODO : split compute between warps
+
+        __syncthreads();
+
+        if(warpid < ACTIVE_TILES) {
+            rt_bf<ATTN_D, ATTN_D> ds;
+            // second part of dv
+            load(k, k_s[warpid]); //happens twice no???
+            load(ds, sds_s[(total_block_idx+warpid)%(ACTIVE_TILES+1)]); //happens twice no???
+            auto &ds_col = swap_layout_inplace(ds);
+            mma_AB(dv, k, ds_col, dv); 
+            store(dodv_s[warpid], dv);
+        } // TODO : split compute between warps
+
+        total_block_idx = (total_block_idx+ACTIVE_TILES)%(ACTIVE_TILES+1); // count backwards on the ring
+        __syncthreads();
+        
+        if(warpid < ACTIVE_TILES) {
+            store(g.dk, dodqqdk_s[warpid], {batch, head, cur_idx, 0});
+            store(g.dv, dodv_s[warpid], {batch, head, cur_idx, 0});
+        } // TODO : split storing between warps
+        __syncthreads();
+    }
+}
+
 bwd_globals bwd_init(
     bf16 *d_q, bf16 *d_k, bf16 *d_v, bf16 *d_do,
     bf16 *d_dq, bf16 *d_dk, bf16 *d_dv,
@@ -314,9 +507,9 @@ torch::Tensor lin_attn_forward(
 //todo : same for bwd
 
 #else
-//#ifdef FWD_HARNESS
+#ifdef FWD_HARNESS
 #include "4090_harness_fwd.impl"
-//#else
-//#include "4090_harness_bwd.impl"
-//#endif
+#else
+#include "4090_harness_bwd.impl"
+#endif
 #endif

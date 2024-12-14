@@ -126,6 +126,13 @@ extern torch::Tensor mamba2(
 );
 #endif
 
+#ifdef TK_COMPILE_LIN_ATTN
+extern torch::Tensor lin_attn_forward(
+    const torch::Tensor q, 
+    const torch::Tensor k, 
+    const torch::Tensor v
+);
+#endif
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "ThunderKittens Kernels"; // optional module docstring
@@ -167,6 +174,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
 #ifdef TK_COMPILE_MAMBA2
     m.def("mamba2", mamba2, "Mamba2 TK. Takes tensors (q, k, v, a). q, k, v tensors are bf16 and a is float.");
+#endif
+
+#ifdef TK_COMPILE_LIN_ATTN
+    m.def("lin_attn", lin_attn_forward, "lin attn forward");
 #endif
 
 }

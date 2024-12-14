@@ -12,3 +12,4 @@ dist/
 *.d
 *_fwd
 *.egg-info
+.vscode/

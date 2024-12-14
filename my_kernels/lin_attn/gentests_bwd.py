@@ -37,6 +37,10 @@ else:
     print('Invalid test name')
     sys.exit(0)
 
+q.requires_grad = True
+k.requires_grad = True
+v.requires_grad = True
+
 o = pytorch_ref(q, k, v)
 J = (o*A).sum()
 J.backward(retain_graph=True)
@@ -44,9 +48,9 @@ grad_q, grad_k, grad_v = q.grad, k.grad, v.grad
 grad_o = torch.autograd.grad(J, o, retain_graph=True)[0]
 
 with open(f'bwd_{B}x{H}x{N}x{D}.txt', 'w') as f:
-    qf = q.to(torch.float32).flatten().cpu().numpy().tolist()
-    kf = k.to(torch.float32).flatten().cpu().numpy().tolist()
-    vf = v.to(torch.float32).flatten().cpu().numpy().tolist()
+    qf = q.to(torch.float32).flatten().cpu().detach().numpy().tolist()
+    kf = k.to(torch.float32).flatten().cpu().detach().numpy().tolist()
+    vf = v.to(torch.float32).flatten().cpu().detach().numpy().tolist()
     dof = grad_o.to(torch.float32).flatten().cpu().numpy().tolist()
     dqf_ref = grad_q.to(torch.float32).flatten().cpu().numpy().tolist()
     dkf_ref = grad_k.to(torch.float32).flatten().cpu().numpy().tolist()

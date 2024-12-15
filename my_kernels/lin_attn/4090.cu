@@ -33,6 +33,18 @@ __device__ inline void cumsum_inplace(ST (&x)[N_TILES], int total_block_idx) {
     }
 }
 
+template<int WORKERS, kittens::ducks::st::all ST, int N_TILES>
+__device__ inline void revcumsum_inplace(ST (&x)[N_TILES], int total_block_idx) {
+    constexpr int STRIDE = WORKERS*kittens::WARP_THREADS;
+
+    for(int i = N_TILES-1; i > 0; i--) {
+        #pragma unroll
+        for(int j = threadIdx.x; j < ST::num_elements; j+=STRIDE) {
+            x[(total_block_idx+i)%N_TILES].data[j] += x[(total_block_idx+i+1)%N_TILES].data[j];
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------
 // ----------------------------------------- Forward kernel ------------------------------------------
 // ---------------------------------------------------------------------------------------------------
@@ -365,14 +377,14 @@ void linear_attention_bwd(const __grid_constant__ bwd_globals g) {
         }
 
         __syncthreads();
-        cumsum_inplace<NUM_WORKERS>(sds_s, total_block_idx);
+        revcumsum_inplace<NUM_WORKERS>(sds_s, total_block_idx);
         __syncthreads();
 
         if(warpid < ACTIVE_TILES) {
             rt_bf<ATTN_D, ATTN_D> ds;
             // second part of dk
             load(v, v_s[warpid]); //happens twice no???
-            load(ds, sds_s[(total_block_idx+warpid)%(ACTIVE_TILES+1)]);
+            load(ds, sds_s[(total_block_idx+warpid+2)%(ACTIVE_TILES+1)]);
             mma_ABt(dk, v, ds, dk); 
             store(dodqqdk_s[warpid], dk);
         } // TODO : split compute between warps
@@ -383,13 +395,13 @@ void linear_attention_bwd(const __grid_constant__ bwd_globals g) {
             rt_bf<ATTN_D, ATTN_D> ds;
             // second part of dv
             load(k, k_s[warpid]); //happens twice no???
-            load(ds, sds_s[(total_block_idx+warpid)%(ACTIVE_TILES+1)]); //happens twice no???
+            load(ds, sds_s[(total_block_idx+warpid+2)%(ACTIVE_TILES+1)]); //happens twice no???
             auto &ds_col = swap_layout_inplace(ds);
             mma_AB(dv, k, ds_col, dv); 
             store(dodv_s[warpid], dv);
         } // TODO : split compute between warps
 
-        total_block_idx = (total_block_idx+ACTIVE_TILES)%(ACTIVE_TILES+1); // count backwards on the ring
+        total_block_idx = ((total_block_idx - ACTIVE_TILES) % (ACTIVE_TILES + 1) + (ACTIVE_TILES + 1)) % (ACTIVE_TILES + 1); // count forwards on the ring (and avoid negative modulo)
         __syncthreads();
         
         if(warpid < ACTIVE_TILES) {

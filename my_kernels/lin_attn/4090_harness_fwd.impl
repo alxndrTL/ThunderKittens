@@ -174,12 +174,9 @@ int main(int argc, char **argv) {
     std::cout << "Total elements: " << TOTAL_ELEMENTS_QKVO << std::endl;
     std::cout << "Total unique elements: " << TOTAL_ELEMENTS_QKVO_READ << std::endl;
 
-    /*
     for(int i = 0; i < 10; i++) {
-        std::cout << o[i] << " " << o_ref[i] << std::endl;
+        std::cout << "o[" << i << "] = " << o[i] << " o_ref[" << i << "] = " << o_ref[i] << std::endl;
     }
-    */
-
     for(int i = 0; i < TOTAL_ELEMENTS_QKVO_READ; i++) {
         float diff = o[i] - o_ref[i];
         if(i < TOTAL_ELEMENTS_QKVO_READ) {

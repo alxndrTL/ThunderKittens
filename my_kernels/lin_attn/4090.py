@@ -9,6 +9,12 @@ ATTN_D = 64
 ACTIVE_TILES = 4
 NUM_WORKERS = 8
 
+B = 1 # keep 1
+H = 1 # keep 1
+N = 1024
+D = ATTN_D
+scale = False
+
 def pytorch_ref(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, scale=False):
     if scale:
         q = q * (q.shape[-1] ** -0.5)
@@ -24,8 +30,9 @@ def make_causal(x):
     mask = torch.triu(torch.ones_like(x), diagonal=1)
     x.masked_fill_(mask.bool(), 0)
 
-def make_causal_t(x): # TODO
-    make_causal(x)
+def make_causal_t(x):
+    mask = torch.triu(torch.ones_like(x), diagonal=1)
+    x.masked_fill_(mask.T.bool(), 0)
 
 def cumsum_inplace(sds_s, start_idx):
     accum = torch.zeros_like(sds_s[0])
@@ -35,9 +42,9 @@ def cumsum_inplace(sds_s, start_idx):
 
 def revcumsum_inplace(sds_s, start_idx):
     accum = torch.zeros_like(sds_s[0])
-    for i in range(ACTIVE_TILES, -1, -1):
-        accum += sds_s[(start_idx + i) % (ACTIVE_TILES + 1)]
-        sds_s[(start_idx + i) % (ACTIVE_TILES + 1)] = accum.clone()
+    for i in range(ACTIVE_TILES + 1):
+        accum += sds_s[(start_idx - i) % (ACTIVE_TILES + 1)]
+        sds_s[(start_idx - i) % (ACTIVE_TILES + 1)] = accum.clone()
 
 def linear_attention_bwd(q_g, k_g, v_g, d_o_g, b, h):
     # q,k,v,d_o: (B,H,N,D)
@@ -130,7 +137,7 @@ def linear_attention_bwd(q_g, k_g, v_g, d_o_g, b, h):
             v_tile = v_s[warpid]
 
             local_attn = v_tile @ d_o_tile.T
-            make_causal(local_attn) # TODO : make_causal_t
+            make_causal_t(local_attn) # TODO : make_causal_t
 
             q_tile = dodqqdk_s[warpid]
             dk_r[warpid] = local_attn @ q_tile
@@ -139,7 +146,7 @@ def linear_attention_bwd(q_g, k_g, v_g, d_o_g, b, h):
             k_tile = k_s[warpid]
 
             local_attn = k_tile @ q_tile.T
-            make_causal(local_attn) # TODO : make_causal_t
+            make_causal_t(local_attn) # TODO : make_causal_t
 
             dv_r[warpid] = local_attn @ d_o_tile
 
@@ -147,7 +154,7 @@ def linear_attention_bwd(q_g, k_g, v_g, d_o_g, b, h):
             accum = q_tile.T @ d_o_tile
             sds_s[(total_block_idx+warpid+1)%(ACTIVE_TILES+1)] = accum
         
-        #revcumsum_inplace(sds_s, total_block_idx)
+        revcumsum_inplace(sds_s, total_block_idx)
 
         for warpid in range(ACTIVE_TILES):
             # second part of dk
@@ -172,12 +179,6 @@ def linear_attention_bwd(q_g, k_g, v_g, d_o_g, b, h):
 
     return dq_g, dk_g, dv_g
 
-B = 1 # keep 1
-H = 1 # keep 1
-N = 1024
-D = ATTN_D
-scale = False
-
 torch.random.manual_seed(42)
 q = (torch.randn((B, H, N, D), dtype=torch.bfloat16, device='cuda')/float(D)**.5).to(torch.float32)
 k = (torch.randn((B, H, N, D), dtype=torch.bfloat16, device='cuda')/float(D)**.5).to(torch.float32)
@@ -195,6 +196,10 @@ grad_q, grad_k, grad_v = q.grad, k.grad, v.grad
 grad_o = torch.autograd.grad(J, o, retain_graph=True)[0]
 
 dq, dk, dv = linear_attention_bwd(q, k, v, grad_o, 0, 0)
+
+print(torch.norm(dq))
+print(torch.norm(dk))
+print(torch.norm(dv))
 
 # checks
 print(torch.allclose(dq, grad_q, atol=1e-4))

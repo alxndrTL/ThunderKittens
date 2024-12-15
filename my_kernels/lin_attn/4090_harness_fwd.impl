@@ -155,7 +155,6 @@ int main(int argc, char **argv) {
     CudaCheckError();
     std::cout << "Finished kernel\n";
 
-
     /*************************** Correctness Checks **************************** */
     
     // check correctness

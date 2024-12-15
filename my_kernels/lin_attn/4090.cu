@@ -319,6 +319,7 @@ void linear_attention_bwd(const __grid_constant__ bwd_globals g) {
 
     for (int block = n_blocks-1; block >= 0; block--) {
         rt_bf<ROWS, ATTN_D> d_o, q, k, v;
+        rt_bf<ROWS, ATTN_D, col_l> q_col;
         rt_bf<ATTN_D, ROWS> qt;
         rt_bf<ROWS, ROWS> local_attn_bf;
         rt_fl<ROWS, ROWS> local_attn;
@@ -348,10 +349,12 @@ void linear_attention_bwd(const __grid_constant__ bwd_globals g) {
             mma_ABt(local_attn, v, d_o, local_attn);
 
             copy(local_attn_bf, local_attn);
-            make_causal_t(local_attn_bf, local_attn_bf, kittens::base_types::constants<bf16>::zero());
+            //make_causal_t(local_attn_bf, local_attn_bf, kittens::base_types::constants<bf16>::zero());
+            make_causal(local_attn_bf, local_attn_bf, kittens::base_types::constants<bf16>::zero());
 
             load(q, dodqqdk_s[warpid]);
-            auto &q_col = swap_layout_inplace(q); // could define q with col_l directly?
+            //auto &q_col = swap_layout_inplace(q); // could define q with col_l directly?
+            swap_layout(q_col, q);
 
             zero(dk);
             mma_AB(dk, local_attn_bf, q_col, dk);
@@ -363,7 +366,8 @@ void linear_attention_bwd(const __grid_constant__ bwd_globals g) {
             mma_ABt(local_attn, k, q, local_attn);
 
             copy(local_attn_bf, local_attn);
-            make_causal_t(local_attn_bf, local_attn_bf, kittens::base_types::constants<bf16>::zero());
+            //make_causal_t(local_attn_bf, local_attn_bf, kittens::base_types::constants<bf16>::zero());
+            make_causal(local_attn_bf, local_attn_bf, kittens::base_types::constants<bf16>::zero());
 
             zero(dv);
             auto &d_o_col = swap_layout_inplace(d_o);
@@ -372,12 +376,12 @@ void linear_attention_bwd(const __grid_constant__ bwd_globals g) {
             // ds
             transpose_sep(qt, q); // todo : instead of transposing, use q_col defined above
             zero(accum);
-            mma_AB(accum, qt, d_o_col, accum);
+            mma_AB(accum, qt, d_o_col, accum); // mma_AtB?
             store(sds_s[(total_block_idx+warpid+1)%(ACTIVE_TILES+1)], accum);
         }
 
         __syncthreads();
-        revcumsum_inplace<NUM_WORKERS>(sds_s, total_block_idx);
+        //revcumsum_inplace<NUM_WORKERS>(sds_s, total_block_idx); // causes a divergence with python
         __syncthreads();
 
         if(warpid < ACTIVE_TILES) {
@@ -385,7 +389,7 @@ void linear_attention_bwd(const __grid_constant__ bwd_globals g) {
             // second part of dk
             load(v, v_s[warpid]); //happens twice no???
             load(ds, sds_s[(total_block_idx+warpid+2)%(ACTIVE_TILES+1)]);
-            mma_ABt(dk, v, ds, dk); 
+            mma_ABt(dk, v, ds, dk);
             store(dodqqdk_s[warpid], dk);
         } // TODO : split compute between warps
 

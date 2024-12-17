@@ -129,7 +129,9 @@ int main(int argc, char **argv) {
     }
 
     bool good = true;
-    float total_diff = 0;
+    float total_rel_diff = 0;
+    float max_rel_diff = 0;
+    float epsilon = 1e-7;
     std::ofstream o_ref_file("printouts/o_ref.txt");
     std::ofstream o_file("printouts/o.txt");
     std::ofstream diff_file("printouts/diff.txt");
@@ -139,6 +141,8 @@ int main(int argc, char **argv) {
     }
     for(int i = 0; i < TOTAL_ELEMENTS; i++) {
         float diff = o[i] - o_ref[i % TOTAL_UNIQUE_ELEMENTS];
+        float rel_diff = abs(diff) / (abs(o_ref[i % TOTAL_UNIQUE_ELEMENTS]) + epsilon);
+
         if(i < TOTAL_UNIQUE_ELEMENTS) {
             o_ref_file << o_ref[i % TOTAL_UNIQUE_ELEMENTS] << ' ';
             o_file << o[i] << ' ';
@@ -152,9 +156,14 @@ int main(int argc, char **argv) {
         if(abs(diff) > 0.01 || isnan(diff)) {
             good = false;
         }
-        total_diff += abs(diff);
+        total_rel_diff += rel_diff;
+        if(rel_diff > max_rel_diff) {
+            std::cout << "o[" << i << "] = " << o[i] << " o_ref[" << i << "] = " << o_ref[i % TOTAL_UNIQUE_ELEMENTS] << " diff = " << diff << " rel_diff = " << rel_diff << std::endl;
+            max_rel_diff = rel_diff;
+        }
     }
-    std::cout << "Average diff: " << total_diff / TOTAL_UNIQUE_ELEMENTS << std::endl;
+    std::cout << "Average rel diff: " << total_rel_diff / TOTAL_UNIQUE_ELEMENTS << std::endl;
+    std::cout << "Max rel diff: " << max_rel_diff << std::endl;
     std::cout << "Average execution time: " << std::chrono::duration_cast<std::chrono::microseconds>(finish - start).count() / ITER << " us" << std::endl;
     if(good) std::cout << "Correct :)\n";
     else std::cout << "Incorrect :(\n";

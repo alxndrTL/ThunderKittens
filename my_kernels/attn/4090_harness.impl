@@ -129,22 +129,17 @@ int main(int argc, char **argv) {
     }
 
     bool good = true;
-    float total_rel_diff = 0;
-    float max_rel_diff = 0;
-    float epsilon = 1e-7;
     std::ofstream o_ref_file("printouts/o_ref.txt");
     std::ofstream o_file("printouts/o.txt");
     std::ofstream diff_file("printouts/diff.txt");
 
-    for(int i = 0; i < 10; i++) {
-        std::cout << "o[" << i << "] = " << o[i] << " o_ref[" << i << "] = " << o_ref[i] << std::endl;
-    }
-    for(int i = 0; i < TOTAL_ELEMENTS; i++) {
-        float diff = o[i] - o_ref[i % TOTAL_UNIQUE_ELEMENTS];
-        float rel_diff = abs(diff) / (abs(o_ref[i % TOTAL_UNIQUE_ELEMENTS]) + epsilon);
+    float total_diff = 0;
+    float max_diff = 0;
 
+    for(int i = 0; i < TOTAL_ELEMENTS; i++) {
+        float diff = o[i] - o_ref[i % (TOTAL_ELEMENTS/ATTN_B)];
         if(i < TOTAL_UNIQUE_ELEMENTS) {
-            o_ref_file << o_ref[i % TOTAL_UNIQUE_ELEMENTS] << ' ';
+            o_ref_file << o_ref[i % (TOTAL_ELEMENTS/ATTN_B)] << ' ';
             o_file << o[i] << ' ';
             diff_file << diff << ' ';
         }
@@ -153,17 +148,31 @@ int main(int argc, char **argv) {
             o_file << '\n';
             diff_file << '\n';
         }
+        if(abs(diff) > max_diff) {
+            max_diff = abs(diff);
+        }
         if(abs(diff) > 0.01 || isnan(diff)) {
             good = false;
         }
-        total_rel_diff += rel_diff;
-        if(rel_diff > max_rel_diff) {
-            std::cout << "o[" << i << "] = " << o[i] << " o_ref[" << i << "] = " << o_ref[i % TOTAL_UNIQUE_ELEMENTS] << " diff = " << diff << " rel_diff = " << rel_diff << std::endl;
-            max_rel_diff = rel_diff;
-        }
+        total_diff += abs(diff);
     }
-    std::cout << "Average rel diff: " << total_rel_diff / TOTAL_UNIQUE_ELEMENTS << std::endl;
-    std::cout << "Max rel diff: " << max_rel_diff << std::endl;
+
+    float sum_ref_sq = 0;
+    for (int i = 0; i < TOTAL_UNIQUE_ELEMENTS; i++) {
+        float val = o_ref[i % (TOTAL_ELEMENTS / ATTN_B)];
+        sum_ref_sq += val * val;
+    }
+    float rms_ref = std::sqrt(sum_ref_sq / TOTAL_UNIQUE_ELEMENTS);
+
+    float avg_diff = total_diff / TOTAL_UNIQUE_ELEMENTS;
+    float rectified_avg_diff = avg_diff / (rms_ref + 1e-9);
+    float rectified_max_diff = max_diff / (rms_ref + 1e-9);
+
+    std::cout << "Average diff: " << avg_diff << std::endl;
+    std::cout << "Max diff: " << max_diff << std::endl;
+    std::cout << "Rectified average diff: " << rectified_avg_diff << std::endl;
+    std::cout << "Rectified max diff: " << rectified_max_diff << std::endl;
+
     std::cout << "Average execution time: " << std::chrono::duration_cast<std::chrono::microseconds>(finish - start).count() / ITER << " us" << std::endl;
     if(good) std::cout << "Correct :)\n";
     else std::cout << "Incorrect :(\n";

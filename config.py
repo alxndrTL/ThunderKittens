@@ -56,7 +56,7 @@ sources = {
     'lin_attn': {
         'source_files': {
             '4090': [
-                'my_kernels/based_attn_128/4090.cu',
+                'my_kernels/lin_attn/4090.cu',
             ]
         }
     }

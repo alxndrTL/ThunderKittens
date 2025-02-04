@@ -13,4 +13,3 @@ dist/
 *_fwd
 *.egg-info
 .vscode/
-lin_attn

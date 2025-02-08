@@ -132,6 +132,12 @@ extern torch::Tensor lin_attn_forward(
     const torch::Tensor k, 
     const torch::Tensor v
 );
+extern std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> lin_attn_backward(
+    const torch::Tensor q,
+    const torch::Tensor k,
+    const torch::Tensor v,
+    const torch::Tensor _do
+);
 #endif
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -178,6 +184,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
 #ifdef TK_COMPILE_LIN_ATTN
     m.def("lin_attn", lin_attn_forward, "lin attn forward");
+    m.def("lin_attn_bwd", lin_attn_backward, "lin attn backward");
 #endif
 
 }

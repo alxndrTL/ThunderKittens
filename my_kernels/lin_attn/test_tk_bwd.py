@@ -17,6 +17,9 @@ torch.random.manual_seed(42)
 q = (torch.randn((B, H, N, D), dtype=torch.bfloat16, device='cuda')/float(D)**.5)
 k = (torch.randn((B, H, N, D), dtype=torch.bfloat16, device='cuda')/float(D)**.5)
 v = (torch.randn((B, H, N, D), dtype=torch.bfloat16, device='cuda')/D)
+q.requires_grad = True
+k.requires_grad = True
+v.requires_grad = True
 
 # warmup
 o = tk.lin_attn(q, k, v) # (B, H, N, D)
@@ -24,29 +27,30 @@ o = tk.lin_attn(q, k, v) # (B, H, N, D)
 o_python_naive = python_naive(q, k, v)
 o_python_chunk = python_chunk(q, k, v)
 
-print(q.mean().item())
-print(k.mean().item())
-print(v.mean().item())
-print(o.mean().item())
-
 print(torch.allclose(o_python_naive, o, atol=1e-2))
-
-# Calculate mean error across B, H, and D dimensions for each index in N
 mean_error = torch.abs(o_python_chunk - o).mean(dim=(0,1,3)).float().cpu()
 
-plt.figure()
-plt.plot(mean_error.numpy())
-plt.xlabel('N index')
-plt.ylabel('Mean Error')
-plt.title('Mean Error over N dimension')
+J = o_python_naive.sum()
+J.backward()
+
+dq, dk, dv = tk.lin_attn_bwd(q, k, v, torch.ones_like(o))
+
+print(torch.allclose(q.grad, dq, atol=1e-1))
+print(torch.allclose(k.grad, dk, atol=1e-1))
+print(torch.allclose(v.grad, dv, atol=1e-1))
+
+#plt.figure()
+#plt.plot(mean_error.numpy())
+#plt.xlabel('N index')
+#plt.ylabel('Mean Error')
+#plt.title('Mean Error over N dimension')
 #plt.savefig('mean_error_pythonnaive_vs_tk.png')
 
 st = time.time()
 for _ in range(iters):
-    o = tk.lin_attn(q, k, v)
+    dq, dk, dv = tk.lin_attn_bwd(q, k, v, torch.ones_like(o))
 et = time.time()
 
 dt = (et - st)/iters
 
 print(f"{dt * 1e6:.2f} µs")
-

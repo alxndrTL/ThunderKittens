@@ -40,6 +40,15 @@ plt.plot(mean_error.numpy())
 plt.xlabel('N index')
 plt.ylabel('Mean Error')
 plt.title('Mean Error over N dimension')
-plt.savefig('mean_error_pythonnaive_vs_fla.png')
+#plt.savefig('mean_error_pythonnaive_vs_fla.png')
+
+st = time.time()
+for _ in range(iters):
+    o, _ = fused_chunk_linear_attn(q, k, v, scale=1, normalize=False)
+et = time.time()
+
+dt = (et - st)/iters
+
+print(f"{dt * 1e6:.2f} µs")
 
 

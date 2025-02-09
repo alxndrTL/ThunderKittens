@@ -149,7 +149,7 @@ void linear_attention_fwd(const __grid_constant__ fwd_globals g) {
             mma_AB(o, q, s_col, o); 
             store(qo_s[warpid], o);
         }
-        total_block_idx = (total_block_idx+ACTIVE_TILES)%(ACTIVE_TILES+1); // count backwards on the ring
+        total_block_idx = (total_block_idx+ACTIVE_TILES)%(ACTIVE_TILES+1);
         __syncthreads();
         
         if(warpid < ACTIVE_TILES) {
@@ -350,7 +350,6 @@ void linear_attention_bwd(const __grid_constant__ bwd_globals g) {
 
             copy(local_attn_bf, local_attn);
             make_causal_t(local_attn_bf, local_attn_bf, kittens::base_types::constants<bf16>::zero());
-            //make_causal(local_attn_bf, local_attn_bf, kittens::base_types::constants<bf16>::zero());
 
             load(q, dodqqdk_s[warpid]);
             //auto &q_col = swap_layout_inplace(q); // could define q with col_l directly?
@@ -367,21 +366,20 @@ void linear_attention_bwd(const __grid_constant__ bwd_globals g) {
 
             copy(local_attn_bf, local_attn);
             make_causal_t(local_attn_bf, local_attn_bf, kittens::base_types::constants<bf16>::zero());
-            //make_causal(local_attn_bf, local_attn_bf, kittens::base_types::constants<bf16>::zero());
 
             zero(dv);
             auto &d_o_col = swap_layout_inplace(d_o);
             mma_AB(dv, local_attn_bf, d_o_col, dv);
 
             // ds
-            transpose_sep(qt, q); // todo : instead of transposing, use q_col defined above
+            transpose_sep(qt, q); // todo : instead of transposing, use q_col defined above?
             zero(accum);
             mma_AB(accum, qt, d_o_col, accum); // mma_AtB?
             store(sds_s[(total_block_idx+warpid+1)%(ACTIVE_TILES+1)], accum);
         }
 
         __syncthreads();
-        revcumsum_inplace<NUM_WORKERS>(sds_s, total_block_idx); // causes a divergence with python
+        revcumsum_inplace<NUM_WORKERS>(sds_s, total_block_idx);
         __syncthreads();
 
         //Todo : fuse the two following loops? or split compute between warps

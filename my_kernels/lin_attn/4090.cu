@@ -128,7 +128,7 @@ void linear_attention_fwd(const __grid_constant__ fwd_globals g) {
         }
         __syncthreads();
 
-        if(warpid < ACTIVE_TILES) {
+        if(warpid < ACTIVE_TILES) { // half of workers are compute/active workers
             //smem->rmem
             load(q, qo_s[warpid]);
             load(k, k_s[warpid]);

@@ -21,6 +21,8 @@
 
 using namespace kittens;
 
+// do a cumsum on a tile, starting from some given position total_block_idx
+// with [2, 1, 8, 3] and total_block_idx = 2, it will give [13, 14, 8, 11] (loops back)
 template<int WORKERS, kittens::ducks::st::all ST, int N_TILES>
 __device__ inline void cumsum_inplace(ST (&x)[N_TILES], int total_block_idx) {
     constexpr int STRIDE = WORKERS*kittens::WARP_THREADS;
@@ -73,6 +75,15 @@ struct fwd_globals {
 __global__ __launch_bounds__(NUM_THREADS, 1)
 void linear_attention_fwd(const __grid_constant__ fwd_globals g) {
 
+    // g_ means the object is in GMEM (global memory, eg 80GB)
+    // s_ means the object is in SMEM (shared memory)
+    // r_ means the object is in RMEM (registers)
+    // _t = tile, _v = vector
+    // _bf means bf16, _fl means float32
+
+    // examples : st_bf = tile in bf16 located in SMEM
+    // rt_fl = tile in float32 in RMEM
+
     const int batch = blockIdx.y;
     const int head  = blockIdx.x;
 
@@ -94,6 +105,7 @@ void linear_attention_fwd(const __grid_constant__ fwd_globals g) {
 
     int n_blocks = g.n / (ACTIVE_TILES * ROWS);
 
+    // loop over the chunks (s_s is the "memory")
     for (int block = 0; block < n_blocks; block++) {
         rt_bf<ROWS, ATTN_D> q, k;
         rt_bf<ATTN_D, ROWS> kt;
@@ -103,39 +115,64 @@ void linear_attention_fwd(const __grid_constant__ fwd_globals g) {
         rt_fl<ATTN_D, ATTN_D> accum;
         rt_fl<ROWS, ATTN_D> o;
 
+        //gmem->smem
         int cur_idx;
-        if(warpid < ACTIVE_TILES) {
+        if(warpid < ACTIVE_TILES) { // half the workers load q,k
             cur_idx = block*ACTIVE_TILES + warpid;
             load(qo_s[warpid], g.q, {batch, head, cur_idx, 0});
             load(k_s[warpid], g.k, {batch, head, cur_idx, 0});
         }
-        else {
+        else { // other half load v
             cur_idx = block*ACTIVE_TILES + warpid - ACTIVE_TILES;
             load(v_s[warpid-ACTIVE_TILES], g.v, {batch, head, cur_idx, 0});
         }
         __syncthreads();
 
         if(warpid < ACTIVE_TILES) {
+            //smem->rmem
             load(q, qo_s[warpid]);
             load(k, k_s[warpid]);
 
+            //compute
             zero(local_attn);
-            mma_ABt(local_attn, q, k, local_attn);
+            mma_ABt(local_attn, q, k, local_attn); // local_attn <- 0 + q@k^T
 
             copy(local_attn_bf, local_attn);
-            make_causal(local_attn_bf, local_attn_bf, kittens::base_types::constants<bf16>::zero());
+            make_causal(local_attn_bf, local_attn_bf, kittens::base_types::constants<bf16>::zero()); // torch.triu
 
             load(v, v_s[warpid]);
             auto &v_col = swap_layout_inplace(v); // could define v with col_l directly?
 
             zero(o);
-            mma_AB(o, local_attn_bf, v_col, o);
+            mma_AB(o, local_attn_bf, v_col, o); // o <- 0 + causal(q@k^T)@v (intra-chunk part)
 
             zero(accum);
             transpose_sep(kt, k);
-            mma_AB(accum, kt, v_col, accum);
-            store(s_s[(total_block_idx+warpid+1)%(ACTIVE_TILES+1)], accum);
+            mma_AB(accum, kt, v_col, accum); // accum <- k^T@v
+            store(s_s[(total_block_idx+warpid+1)%(ACTIVE_TILES+1)], accum); // store k^T@v in next mini chunk (see belows)
         }
+
+        // s_s is a ring buffer, meaning that we treat it as some kind of cyclic array
+        // it has a length of w+1, where w is the number of "active" workers (ACTIVE_TILES, as opposed to NUM_WORKERS which also includes the "loader" workers)
+        // warpid identifies the worker (0, ... NUM_WORKERS-1)
+
+        // total_block_idx is the position in s_s that contains the memory from the prev chunk
+        // in the previous computation part, each worker placed its k^T@v at position total_block_idx+warpid+1 in s_s (being cyclic, it can loop back) :
+        // with 4 workers and total_block_idx=2, we have :
+        // [k2^T@v2, k3^T@v3, memory, k0^T@v0, k1^T@v1] (k0^T@v0 was computed and placed by worker 0, and so on)
+        // calling cumsum_inplace will do a cumsum starting from the "memory" element:
+        // [memory+k0^T@v0+k1^T@v1+k2@T@v2, memory+k0^T@v0+k1^T@v1+k2^T@v2+k3^T@v3, memory, memory+k0^T@v0, memory+k0^T@v0+k1^T@v1]
+
+        // so now, each worker can look at position total_block_idx+warpid in s_s and get the whole memory (that accounts from the previous chunks - "memory", bu also from the k^T@v's from the current chunk)
+        // for example worker 2 will have memory+k0^T@v0+k1^T@v1, which is what we want for that worker for it to compute the "q@s" part (inter-chunk)
+
+        // also, if we look at the example, we see now that the complete memory is now located one position before where "memory" was
+        // that's why we do this :
+        // total_block_idx = (total_block_idx+ACTIVE_TILES)%(ACTIVE_TILES+1);
+        // we "count backwards on the ring", to prepare for the next chunk
+
+        // so even within a chunk, we do mini-chunks (each handled by a single worker).
+        // mini-chunks are computed in //, and the results are propagated with a recurrence (ie a cumsum)
 
         __syncthreads();
         cumsum_inplace<NUM_WORKERS>(s_s, total_block_idx);
@@ -146,13 +183,14 @@ void linear_attention_fwd(const __grid_constant__ fwd_globals g) {
             load(q, qo_s[warpid]);
             load(s, s_s[(total_block_idx+warpid)%(ACTIVE_TILES+1)]); // could define s with col_l directly?
             auto &s_col = swap_layout_inplace(s);
-            mma_AB(o, q, s_col, o); 
+            mma_AB(o, q, s_col, o); // o <- 0 + q@s (inter-chunk part)
             store(qo_s[warpid], o);
         }
-        total_block_idx = (total_block_idx+ACTIVE_TILES)%(ACTIVE_TILES+1);
+        total_block_idx = (total_block_idx+ACTIVE_TILES)%(ACTIVE_TILES+1); // 0, 8, 7, 6, 5, 4, 3, 2, 1, 0, 8, ...
         __syncthreads();
         
-        if(warpid < ACTIVE_TILES) {
+        // smem->gmem
+        if(warpid < ACTIVE_TILES) { // half the workers store o
             store(g.o, qo_s[warpid], {batch, head, cur_idx, 0});
         }
         __syncthreads();
